@@ -27,7 +27,6 @@ import Lake.CLI.Build
 import Lake.CLI.Actions
 import Lake.CLI.Translate
 import Lake.CLI.Serve
-public import Lake.CLI.BuiltinLint
 import Init.Data.String.Modify
 
 -- # CLI
@@ -73,7 +72,6 @@ public structure LakeOptions where
   rev? : Option String := none
   maxRevs : Nat := 100
   shake : Shake.Args := {}
-  builtinLint : BuiltinLint.Args := {}
 
 def LakeOptions.outLv (opts : LakeOptions) : LogLevel :=
   opts.outLv?.getD opts.verbosity.minLogLv
@@ -304,19 +302,12 @@ def lakeLongOption : (opt : String) → CliM PUnit
 | "--"            => do
   let subArgs ← takeArgs
   modifyThe LakeOptions ({· with subArgs})
--- Builtin lint options
-| "--clippy" => modifyThe LakeOptions ({· with builtinLint.clippy := true})
-| "--lint-only" => do
-  let name ← takeOptArg "--lint-only" "linter name"
-  modifyThe LakeOptions fun opts =>
-    {opts with builtinLint.only := opts.builtinLint.only.push name.toName}
--- Shared options
-| "--force" => modifyThe LakeOptions ({· with shake.force := true, builtinLint.force := true})
 -- Shake options
 | "--keep-implied" => modifyThe LakeOptions ({· with shake.keepImplied := true})
 | "--keep-prefix" => modifyThe LakeOptions ({· with shake.keepPrefix := true})
 | "--keep-public" => modifyThe LakeOptions ({· with shake.keepPublic := true})
 | "--add-public" => modifyThe LakeOptions ({· with shake.addPublic := true})
+| "--force" => modifyThe LakeOptions ({· with shake.force := true})
 | "--gh-style" => modifyThe LakeOptions ({· with shake.githubStyle := true})
 | "--explain" => modifyThe LakeOptions ({· with shake.explain := true})
 | "--trace" => modifyThe LakeOptions ({· with shake.trace := true})
@@ -954,50 +945,18 @@ protected def checkTest : CliM PUnit := do
   let pkg ← loadPackage (← mkLoadConfig (← getThe LakeOptions))
   noArgsRem do exit <| if pkg.testDriver.isEmpty then 1 else 0
 
-/-- Run builtin environment linters on a loaded workspace. -/
-private def runBuiltinLint
-    (ws : Workspace) (args : BuiltinLint.Args) (mods : Array Lean.Name)
-: CliM PUnit := do
-  let mods := if mods.isEmpty then ws.defaultTargetRoots else mods
-  if mods.isEmpty then
-    error "no modules specified and there are no applicable default targets"
-  let args := {args with mods}
-  unless args.force do
-    let specs ← parseTargetSpecs ws []
-    let upToDate ← ws.checkNoBuild (buildSpecs specs)
-    unless upToDate do
-      error "there are out of date oleans; run `lake build` or fetch them from a cache first"
-  -- Set the search path so importModules can find oleans
-  Lean.searchPathRef.set ws.augmentedLeanPath
-  let exitCode ← BuiltinLint.run args
-  if exitCode != 0 then
-    exit exitCode
-
 protected def lint : CliM PUnit := do
   processOptions lakeOption
   let opts ← getThe LakeOptions
   let ws ← loadWorkspace (← mkLoadConfig opts)
-  if ws.root.lintDriver.isEmpty then
-    let mods := (← takeArgs).toArray.map (·.toName)
-    runBuiltinLint ws opts.builtinLint mods
-  else
-    noArgsRem do
-    let x := ws.root.lint opts.subArgs (mkBuildConfig opts)
-    exit <| ← x.run (mkLakeContext ws)
+  noArgsRem do
+  let x := ws.root.lint opts.subArgs (mkBuildConfig opts)
+  exit <| ← x.run (mkLakeContext ws)
 
 protected def checkLint : CliM PUnit := do
   processOptions lakeOption
   let pkg ← loadPackage (← mkLoadConfig (← getThe LakeOptions))
   noArgsRem do exit <| if pkg.lintDriver.isEmpty then 1 else 0
-
-/-- The `lake builtin-lint` command: run builtin environment linters. -/
-protected def builtinLint : CliM PUnit := do
-  processOptions lakeOption
-  let opts ← getThe LakeOptions
-  let config ← mkLoadConfig opts
-  let ws ← loadWorkspace config
-  let mods := (← takeArgs).toArray.map (·.toName)
-  runBuiltinLint ws opts.builtinLint mods
 
 protected def clean : CliM PUnit := do
   processOptions lakeOption
@@ -1189,7 +1148,6 @@ def lakeCli : (cmd : String) → CliM PUnit
 | "test"                => lake.test
 | "check-test"          => lake.checkTest
 | "lint"                => lake.lint
-| "builtin-lint"        => lake.builtinLint
 | "check-lint"          => lake.checkLint
 | "clean"               => lake.clean
 | "shake"               => lake.shake
