@@ -15,6 +15,8 @@ import Lake.Build.Topological
 import Lake.Load.Materialize
 import Lake.Load.Lean.Eval
 import Lake.Load.Package
+import Init.Data.Range.Polymorphic.Iterators
+import Init.TacticsExtra
 
 open System Lean
 
@@ -45,23 +47,29 @@ namespace Lake
 def Workspace.addFacetDecls (decls : Array FacetDecl) (self : Workspace) : Workspace :=
   decls.foldl (·.addFacetConfig ·.config) self
 
+theorem Workspace.packages_addFacetDecls :
+  (addFacetDecls decls ws).packages = ws.packages
+:= by
+  simp only [addFacetDecls]
+  apply Array.foldl_induction (fun _ (s : Workspace) => s.packages = ws.packages) rfl
+  intro i s h
+  simp only [packages_addFacetConfig, h]
+
 /--
 Loads the package configuration of a materialized dependency.
 Adds the package and the facets defined within it to the `Workspace`.
 -/
-def addDepPackage
-  (dep : MaterializedDep)
-  (lakeOpts : NameMap String)
-  (leanOpts : Options) (reconfigure : Bool)
-: StateT Workspace LogIO Package := fun ws => do
+def Workspace.addDepPackage'
+  (ws : Workspace) (dep : MaterializedDep)
+  (lakeOpts : NameMap String) (leanOpts : Options) (reconfigure : Bool)
+: LogIO {ws' : Workspace // ws'.packages.size = ws.packages.size + 1} := do
   let wsIdx := ws.packages.size
   let loadCfg := mkDepLoadConfig ws dep lakeOpts leanOpts reconfigure
   let ⟨loadCfg, h⟩ ← resolveConfigFile dep.prettyName loadCfg
   let fileCfg ← loadConfigFile loadCfg h
   let pkg := mkPackage loadCfg fileCfg wsIdx
-  let ws := ws.addPackage' pkg wsIdx_mkPackage
-  let ws := ws.addFacetDecls fileCfg.facetDecls
-  return (pkg, ws)
+  let ws := ws.addPackage' pkg wsIdx_mkPackage |>.addFacetDecls fileCfg.facetDecls
+  return ⟨ws, by simp [ws, packages_addFacetDecls, packages_addPackage']⟩
 
 /--
 The resolver's call stack of dependencies.
@@ -103,6 +111,52 @@ abbrev ResolveT m := DepStackT <| StateT Workspace m
     recFetchAcyclic (·.baseName) go root
   return ws
 
+def Workspace.setDepPkgs
+  (self : Workspace) (wsIdx : Nat) (depPkgs : Array Package)
+: Workspace := {self with
+  packages := self.packages.modify wsIdx ({· with depPkgs})
+  size_packages_pos := by simp [self.size_packages_pos]
+  packages_wsIdx {i} := by
+    if h : wsIdx = i then
+      simp [h, Array.getElem_modify_self, self.packages_wsIdx]
+    else
+      simp [Array.getElem_modify_of_ne h, self.packages_wsIdx]
+}
+
+structure ResolveState where
+  ws : Workspace
+  depIdxs : Array Nat
+  lt_of_mem : ∀ i ∈ depIdxs, i < ws.packages.size
+
+namespace ResolveState
+
+@[inline] def init (ws : Workspace) (size : Nat) : ResolveState :=
+  {ws, depIdxs := Array.mkEmpty size, lt_of_mem := by simp}
+
+@[inline] def reuseDep (s : ResolveState) (wsIdx : Fin s.ws.packages.size) : ResolveState :=
+  have lt_of_mem := by
+    intro i i_mem
+    cases Array.mem_push.mp i_mem with
+    | inl i_mem => exact s.lt_of_mem i i_mem
+    | inr i_eq => simp only [i_eq, wsIdx.isLt]
+  {s with depIdxs := s.depIdxs.push wsIdx, lt_of_mem}
+
+@[inline] def newDep
+  (s : ResolveState) (dep : MaterializedDep)
+  (lakeOpts : NameMap String) (leanOpts : Options) (reconfigure : Bool)
+: LogIO ResolveState := do
+  let ⟨ws, depIdxs, lt_of_mem⟩ := s
+  let wsIdx := ws.packages.size
+  let ⟨ws', h⟩ ← ws.addDepPackage' dep lakeOpts leanOpts reconfigure
+  have lt_of_mem := by
+    intro i i_mem
+    cases Array.mem_push.mp i_mem with
+    | inl i_mem => exact h ▸ Nat.lt_add_one_of_lt (lt_of_mem i i_mem)
+    | inr i_eq => simp only [wsIdx, i_eq, h, Nat.lt_add_one]
+  return ⟨ws', depIdxs.push wsIdx, lt_of_mem⟩
+
+end ResolveState
+
 /-
 Recursively visits each node in a package's dependency graph, starting from
 the workspace package `root`. Each dependency missing from the workspace is
@@ -121,19 +175,31 @@ See `Workspace.updateAndMaterializeCore` for more details.
 : m Workspace := do
   ws.runResolveT go root stack
 where
-  @[specialize] go pkg recurse : ResolveT m Unit := do
-    let start := (← getWorkspace).packages.size
+  @[specialize] go pkg recurse : ResolveT m Unit := fun depStack ws => do
+    let start := ws.packages.size
     -- Materialize and load the missing direct dependencies of `pkg`
-    pkg.depConfigs.forRevM fun dep => do
-      let ws ← getWorkspace
-      if ws.packages.any (·.baseName == dep.name) then
-        return -- already handled in another branch
+    let s := ResolveState.init ws pkg.depConfigs.size
+    let ⟨ws, depIdxs, lt_of_mem⟩ ← pkg.depConfigs.foldrM (m := m) (init := s) fun dep s => do
+      if let some wsIdx := s.ws.packages.findFinIdx? (·.baseName == dep.name) then
+        return s.reuseDep wsIdx -- already handled in another branch
       if pkg.baseName = dep.name then
         error s!"{pkg.prettyName}: package requires itself (or a package with the same name)"
-      let matDep ← resolve pkg dep (← getWorkspace)
-      discard <| addDepPackage matDep dep.opts leanOpts reconfigure
+      let matDep ← resolve pkg dep s.ws
+      s.newDep matDep dep.opts leanOpts reconfigure
+    let depsEnd := ws.packages.size
     -- Recursively load the dependencies' dependencies
-    (← getWorkspace).packages.forM recurse start
+    let ws ← ws.packages.foldlM (start := start) (init := ws) fun ws pkg =>
+      (·.2) <$> recurse pkg depStack ws
+    -- Add the package's dependencies to the package
+    let ws :=
+      if h_le : depsEnd ≤ ws.packages.size then
+        ws.setDepPkgs pkg.wsIdx <| depIdxs.attach.map fun ⟨wsIdx, h_mem⟩ =>
+          ws.packages[wsIdx]'(Nat.lt_of_lt_of_le (lt_of_mem wsIdx h_mem) h_le)
+      else
+        have : Inhabited Workspace := ⟨ws⟩
+        panic! "workspace shrunk" -- should be unreachable
+    return ((), ws)
+
 
 /--
 Adds monad state used to update the manifest.
@@ -372,10 +438,14 @@ def Workspace.updateAndMaterializeCore
     let start := ws.packages.size
     let ws ← (deps.zip matDeps).foldlM (init := ws) fun ws (dep, matDep) => do
       addDependencyEntries matDep
-      let (_, ws) ← addDepPackage matDep dep.opts leanOpts true ws
+      let ⟨ws, _⟩ ← ws.addDepPackage' matDep dep.opts leanOpts true
       return ws
-    ws.packages.foldlM (init := ws) (start := start) fun ws pkg =>
+    let stop := ws.packages.size
+    let ws ← ws.packages.foldlM (init := ws) (start := start) fun ws pkg =>
       ws.resolveDepsCore updateAndAddDep pkg [ws.root.baseName] leanOpts true
+    -- Set dependency packages after `resolveDepsCore` so
+    -- that the dependencies' dependencies are also properly set
+    return ws.setDepPkgs ws.root.wsIdx ws.packages[start...<stop]
   else
     ws.resolveDepsCore updateAndAddDep (leanOpts := leanOpts) (reconfigure := true)
 where
