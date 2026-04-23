@@ -9,8 +9,6 @@ prelude
 public import Init.Prelude
 import Init.Tactics
 
-namespace Lake
-
 opaque POpaque.nonemptyType.{u} : NonemptyType.{u}
 
 /-- An value of unknown type in a specific universe. -/
