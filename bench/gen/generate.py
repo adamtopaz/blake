@@ -33,7 +33,7 @@ import sys
 from collections import deque
 from pathlib import Path
 
-GENERATOR_VERSION = 3
+GENERATOR_VERSION = 4
 
 SHAPES = ("layered", "deep", "wide")
 
@@ -222,7 +222,16 @@ def structure_decl(idx: int, rng: random.Random) -> str:
             f"  unfold Point{idx}.norm1\n  omega\n")
 
 
-def render_module(i: int, imports: list[int], meta: str, cfg: dict, rng: random.Random) -> str:
+def val_body(i: int, imports: list[int], consts: list[int]) -> str:
+    """The right-hand side of module i's `val`, as Lean source over `n`."""
+    if not imports:
+        return f"n + {consts[i]}"
+    terms = " + ".join(f"{module_name(j)}.val (n + {k})" for k, j in enumerate(imports))
+    return f"{terms} + {consts[i]}"
+
+
+def render_module(i: int, imports: list[int], all_imports: list[list[int]], consts: list[int], meta: str,
+                  cfg: dict, rng: random.Random) -> str:
     name = module_name(i)
     lines = []
     for j in imports:
@@ -237,15 +246,21 @@ def render_module(i: int, imports: list[int], meta: str, cfg: dict, rng: random.
     # The `val` chain gives every module a real dependency on the declarations of
     # its imports, so a change upstream is semantically visible downstream.
     if imports:
-        terms = " + ".join(f"{module_name(j)}.val (n + {k})" for k, j in enumerate(imports))
         haves = "\n".join(f"  have h{k} := {module_name(j)}.val_ge (n + {k})" for k, j in enumerate(imports))
         lines.append("/-- Value chained through this module's imports. -/")
-        lines.append(f"def val (n : Nat) : Nat :=\n  {terms} + {rng.randrange(1, 9)}")
+        lines.append(f"def val (n : Nat) : Nat :=\n  {val_body(i, imports, consts)}")
         lines.append("")
         lines.append(f"theorem val_ge (n : Nat) : n ≤ val n := by\n  unfold val\n{haves}\n  omega")
+        lines.append("")
+        # Restate each import's definition body by `rfl`, so this module's build
+        # depends on the *bodies* of its imports, not only on their statements:
+        # a build tool that skipped rebuilding dependents after a body change
+        # would leave these proofs stale.
+        for k, j in enumerate(imports):
+            lines.append(f"theorem imp_unfold_{k} (n : Nat) : {module_name(j)}.val n = {val_body(j, all_imports[j], consts)} := rfl")
     else:
         lines.append("/-- Root value of the chain. -/")
-        lines.append(f"def val (n : Nat) : Nat := n + {rng.randrange(1, 9)}")
+        lines.append(f"def val (n : Nat) : Nat := {val_body(i, imports, consts)}")
         lines.append("")
         lines.append("theorem val_ge (n : Nat) : n ≤ val n := by\n  unfold val\n  omega")
     lines.append("")
@@ -349,10 +364,11 @@ def main() -> None:
     total_lines = 0
     sha = hashlib.sha256()
     modules = []
+    consts = [random.Random(f"{cfg['seed']}-{i}-const").randrange(1, 9) for i in range(n)]
     for i in range(n):
         mrng = random.Random(f"{cfg['seed']}-{i}")
         meta = f"layer {layer[i]}, {len(imports[i])} imports"
-        text = render_module(i, imports[i], meta, cfg, mrng)
+        text = render_module(i, imports[i], imports, consts, meta, cfg, mrng)
         path = out / module_path(i)
         data = text.encode("utf-8")
         path.write_bytes(data)

@@ -5,7 +5,7 @@
 # process tree, not just reaped children.
 "$@"
 rc=$?
-if [ -n "${BLAKE_BENCH_STATS:-}" ]; then
+if [ -n "${BLAKE_BENCH_STATS:-}" ] && [ "${BLAKE_BENCH_SCOPED:-0}" = "1" ]; then
   cg=$(cut -d: -f3 /proc/self/cgroup 2>/dev/null | head -n1)
   {
     echo "cgroup=$cg"

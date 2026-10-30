@@ -13,9 +13,11 @@ interleaved run by run so that drift of the machine affects them all alike):
   leaf   edit a module nobody imports, rebuild
   swarm  edit many little-imported modules spread over the DAG at once, rebuild
   hub    edit the most widely imported module, rebuild (large downstream rebuild)
-  break  (untimed, always run) rename a theorem in the hub so every dependent
-         must fail; the build must fail exactly as stock Lake's does; then
-         restore and rebuild
+  break  (untimed, always run) two breaking edits to the hub, one renaming a
+         theorem every dependent uses (interface change) and one changing the
+         constant in its definition body, which every dependent restates by
+         `rfl` (body-only change); each must fail with exactly as many failed
+         jobs as stock Lake, then restore and rebuild
 
 Edits accumulate (each is a new appended theorem), so no restore step is needed
 and every tool sees exactly the same sequence of edits.
@@ -122,6 +124,11 @@ def run(cmd: list[str], cwd: Path | None = None, env: dict | None = None, check:
 
 def git(*args: str, cwd: Path = ROOT, check: bool = True) -> str:
     return run(["git", *args], cwd=cwd, check=check).stdout.strip()
+
+
+def tree_dirty() -> bool:
+    """Uncommitted changes to tracked files, ignoring research/ (log entries are written during an iteration)."""
+    return bool(git("status", "--porcelain", "--untracked-files=no", "--", ".", ":(exclude)research"))
 
 
 def sha256_file(p: Path) -> str:
@@ -316,7 +323,7 @@ def resolve_tools(names: list[str], env: dict, main_ref: str | None) -> tuple[di
     prefix = toolchain_prefix(env)
     tools: dict[str, dict] = {}
     head = git("rev-parse", "HEAD")
-    dirty = bool(git("status", "--porcelain", "--untracked-files=no"))
+    dirty = tree_dirty()
     main_commit, main_how = resolve_main_ref(main_ref) if "main" in names else (None, None)
     for name in names:
         if name == "lake":
@@ -430,13 +437,26 @@ def apply_edit(corpus_dir: Path, corpus: dict, names: list[str], stamp: int) -> 
             fh.write(f"\ntheorem {name}.bench_edit_{stamp} (n : Nat) : {name}.val n ≤ {name}.val n + {stamp} := by\n  omega\n")
 
 
-def apply_break(corpus_dir: Path, corpus: dict, name: str) -> str:
-    """Rename the hub's `val_ge`, which every dependent uses. Returns the original text."""
+def apply_break(corpus_dir: Path, corpus: dict, name: str, kind: str) -> str:
+    """Make a change to the hub that every direct dependent must notice. Returns the original text.
+
+    kind "rename": rename the hub's `val_ge`, which every dependent's proof uses
+      (a change of interface);
+    kind "body": change the constant in the hub's `val`, which every dependent
+      restates by `rfl` (a change of definition body only; the statement of
+      every hub declaration stays the same).
+    """
     f = module_file(corpus_dir, corpus, name)
     original = f.read_text(encoding="utf-8")
-    broken = original.replace("theorem val_ge ", "theorem val_ge_renamed ", 1)
+    if kind == "rename":
+        broken = original.replace("theorem val_ge ", "theorem val_ge_renamed ", 1)
+    elif kind == "body":
+        m = re.search(r"(def val \(n : Nat\) : Nat :=\s+.*? \+ )(\d+)\n", original, re.S)
+        broken = original[: m.start(2)] + str(int(m.group(2)) + 1) + original[m.end(2):] if m else original
+    else:
+        raise ValueError(kind)
     if broken == original:
-        raise RuntimeError(f"could not apply breaking edit to {name}")
+        raise RuntimeError(f"could not apply breaking edit {kind!r} to {name}")
     f.write_text(broken, encoding="utf-8")
     return original
 
@@ -477,6 +497,7 @@ class Session:
         stats_file.unlink(missing_ok=True)
         env = dict(self.env)
         env["BLAKE_BENCH_STATS"] = str(stats_file)
+        env["BLAKE_BENCH_SCOPED"] = "1" if self.use_scope else "0"
         if self.use_scope:
             props = ["-p", f"MemoryMax={self.mem_gb}G"] if self.mem_gb else []
             cmd = ["systemd-run", "--user", "--scope", "-q", f"--unit={unit}", *props, "--",
@@ -614,11 +635,14 @@ def bench_corpus(cfg_name: str, src: Path, corpus: dict, targets: dict, tools: d
             continue
         runs: dict[str, list[dict]] = {name: [] for name in order}
         n_runs = repeat
+        fast = False
         i = 0
         while i < n_runs:
             stamp += 1
             edit = {"leaf": [targets["leaf"]], "hub": [targets["hub"]], "swarm": targets["swarm"]}.get(scen)
             rotation = order[i % len(order):] + order[: i % len(order)]
+            if i % 2:
+                rotation.reverse()  # a rotated cycle never reverses; alternate it so position effects cancel
             for name in rotation:
                 if name in failed:
                     continue
@@ -633,33 +657,38 @@ def bench_corpus(cfg_name: str, src: Path, corpus: dict, targets: dict, tools: d
             if i == 0:
                 first = [runs[n][0]["wall_s"] for n in order if runs[n]]
                 if first and max(first) < FAST_SECONDS:
+                    fast = True
                     n_runs = max(repeat, repeat_fast)  # cheap scenario: take many samples
             i += 1
         for name in order:
             results[name][scen] = summarize(runs[name])
+            results[name][scen]["fast"] = fast
             res = results[name][scen]
             if res.get("median_wall_s") is not None:
                 log(f"[{cfg_name}/{name}] {scen}: median {res['median_wall_s']:.2f}s "
                     f"(min {res['min_wall_s']:.2f}, max {res['max_wall_s']:.2f}, n {len(runs[name])}, jobs {runs[name][0]['jobs']})")
 
-    # breaking edit: every dependent of the hub must fail to build, then recover
+    # breaking edits: every direct dependent of the hub must fail to build, then recover
     for name in order:
         if name in failed:
             results[name]["break"] = {"ok": False, "skipped": "earlier failure"}
             results[name]["stragglers_total"] = sessions[name].stragglers
             continue
         s = sessions[name]
-        original = apply_break(s.dir, corpus, targets["hub"])
-        broken = s.build()
-        module_file(s.dir, corpus, targets["hub"]).write_text(original, encoding="utf-8")
-        recovered = s.build()
-        record(name, "recovered")
-        results[name]["break"] = {"broken_exit_code": broken["exit_code"], "broken_failed_jobs": broken["failed_jobs"],
-                                  "recovered_exit_code": recovered["exit_code"], "recovered_wall_s": recovered["wall_s"],
-                                  "ok": broken["exit_code"] != 0 and recovered["exit_code"] == 0
-                                  and not (broken["stragglers"] or recovered["stragglers"])}
-        log(f"[{cfg_name}/{name}] break: broken build exit {broken['exit_code']} ({broken['failed_jobs']} failed jobs), "
-            f"recovered exit {recovered['exit_code']}")
+        brk: dict = {"ok": True}
+        for kind in ("rename", "body"):
+            original = apply_break(s.dir, corpus, targets["hub"], kind)
+            broken = s.build()
+            module_file(s.dir, corpus, targets["hub"]).write_text(original, encoding="utf-8")
+            recovered = s.build()
+            record(name, f"recovered/{kind}")
+            brk[kind] = {"broken_exit_code": broken["exit_code"], "broken_failed_jobs": broken["failed_jobs"],
+                         "recovered_exit_code": recovered["exit_code"], "recovered_wall_s": recovered["wall_s"]}
+            brk["ok"] = brk["ok"] and broken["exit_code"] != 0 and recovered["exit_code"] == 0 \
+                and not (broken["stragglers"] or recovered["stragglers"])
+            log(f"[{cfg_name}/{name}] break/{kind}: broken build exit {broken['exit_code']} ({broken['failed_jobs']} failed jobs), "
+                f"recovered exit {recovered['exit_code']}")
+        results[name]["break"] = brk
         results[name]["stragglers_total"] = s.stragglers
     return results, manifests
 
@@ -681,7 +710,10 @@ def correctness_for(tool_name: str, per_cfg_manifests: dict, per_cfg_results: di
         lake_res = per_cfg_results[cfg_name].get("lake", {})
         builds_ok = all(v.get("ok", False) for k, v in res.items() if k in ALL_SCENARIOS)
         brk = res.get("break", {})
-        break_ok = bool(brk.get("ok")) and brk.get("broken_failed_jobs") == lake_res.get("break", {}).get("broken_failed_jobs")
+        lake_brk = lake_res.get("break", {})
+        break_ok = bool(brk.get("ok")) and all(
+            brk.get(kind, {}).get("broken_failed_jobs") == lake_brk.get(kind, {}).get("broken_failed_jobs")
+            for kind in ("rename", "body"))
         out[cfg_name] = {
             "identical": bool(steps) and all(v["identical"] for v in steps.values()),
             "builds_ok": builds_ok,
@@ -720,7 +752,7 @@ def verdicts(measurements: dict, correctness: dict, tools: list[str]) -> dict:
                 continue
             if scen == "cold":
                 t = COLD_THRESHOLD
-            elif m["median_wall_s"] < FAST_SECONDS:
+            elif m.get("fast", m["median_wall_s"] < FAST_SECONDS):
                 t = NOISE_FLOOR_FAST
             else:
                 t = NOISE_FLOOR
@@ -826,8 +858,8 @@ def main() -> None:
     ap.add_argument("--tools", default=DEFAULT_TOOLS, help="comma-separated: lake, main, candidate")
     ap.add_argument("--main-ref", default=None, help="git ref for `main` (default: merge-base of HEAD and origin/main)")
     ap.add_argument("--scenarios", default=",".join(ALL_SCENARIOS))
-    ap.add_argument("--repeat", type=int, default=3, help="runs per incremental scenario taking >= 2 s (compared on medians)")
-    ap.add_argument("--repeat-fast", type=int, default=10, help="runs per incremental scenario taking < 2 s (compared on minima)")
+    ap.add_argument("--repeat", type=int, default=3, help="paired runs per incremental scenario taking >= 2 s")
+    ap.add_argument("--repeat-fast", type=int, default=10, help="paired runs per incremental scenario taking < 2 s")
     ap.add_argument("--cpus", default=None, help="CPU list to pin to, e.g. 0-15 (default: bench/local.json or half)")
     ap.add_argument("--mem-gb", type=int, default=None, help="memory cap in GiB (default: bench/local.json or half)")
     ap.add_argument("--out", default=None, help="result JSON path (default: research/results/ for standard runs, else bench/work/results/)")
@@ -878,11 +910,14 @@ def main() -> None:
     if scrubbed:
         log(f"scrubbed from the environment: {', '.join(scrubbed)}")
     tool_names = [t for t in args.tools.split(",") if t]
+    # The tree's state when the candidate is built is what the result describes.
+    dirty = tree_dirty()
     tools, toolchain = resolve_tools(tool_names, env, args.main_ref)
     tool_order = [t for t in tool_names if "alias" not in tools[t]]
-    dirty = bool(git("status", "--porcelain", "--untracked-files=no"))
 
     nonstandard = []
+    if args.main_ref:
+        nonstandard.append("main-ref")
     if cfg_names != default_cfgs:
         nonstandard.append("configs")
     if tool_names != DEFAULT_TOOLS.split(","):
@@ -944,7 +979,8 @@ def main() -> None:
         "toolchain": {"pin": (ROOT / "lean-toolchain").read_text(encoding="utf-8").strip(), **toolchain},
         "harness": {"run_py_sha256": sha256_file(Path(__file__)), "generate_py_sha256": sha256_file(GEN),
                     "scrubbed_env": scrubbed, "build_timeout_s": BUILD_TIMEOUT_S},
-        "git": {"commit": git("rev-parse", "HEAD"), "branch": git("rev-parse", "--abbrev-ref", "HEAD"), "dirty": dirty},
+        "git": {"commit": git("rev-parse", "HEAD"), "branch": git("rev-parse", "--abbrev-ref", "HEAD"), "dirty": dirty,
+                "dirty_ignores": "research/"},
         "tools": {k: {kk: vv for kk, vv in v.items() if kk != "env"} for k, v in tools.items()},
         "tool_order": tool_names,
         "tool_order_per_corpus": orders,
