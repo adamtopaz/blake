@@ -1,0 +1,60 @@
+/-
+Blake build configuration.
+
+Adapted from `tests/lake/lakefile.toml` and `src/lakefile.toml.in` in the
+Lean 4 repository. Blake is built as a `bootstrap` package, the same way Lake
+is built inside the Lean tree. A bootstrap build does not namespace native
+symbols by package name, so `libLake` exports `initialize_Lake`, which Lean
+looks up when `lake` loads its own shared library as a plugin (e.g. to build
+packages with `precompileModules`). Together with `nativeLibDir`, this matches
+the installation layout a source-built `lake` expects of itself (see
+`LakeInstall` in `Lake/Config/InstallPath.lean`).
+-/
+import Lake
+open System Lake DSL
+
+package blake where
+  bootstrap := true
+  nativeLibDir := "lib" / "lean"
+  libPrefixOnWindows := true
+  -- A bootstrap package compiles C against `<buildDir>/include` rather than the
+  -- toolchain's include directory, so populate it first (see `leanInclude`).
+  extraDepTargets := #[`leanInclude]
+
+/--
+Copies Lean's C headers (`lean/lean.h` and friends) from the detected Lean
+toolchain into the package's bootstrap include directory, which Lake uses as
+the include path for all C compilation in a `bootstrap` package
+(see `leanIncludeDirs` in `Lake/Build/Run.lean`).
+-/
+target leanInclude pkg : FilePath := do
+  let srcDir := (← getLeanIncludeDir) / "lean"
+  let dstDir := pkg.bootstrapIncludeDir / "lean"
+  IO.FS.createDirAll dstDir
+  for entry in (← srcDir.readDir) do
+    if (← entry.path.isDir) then continue
+    let dst := dstDir / entry.fileName
+    let contents ← IO.FS.readBinFile entry.path
+    let upToDate ← do
+      if (← dst.pathExists) then pure ((← IO.FS.readBinFile dst) == contents) else pure false
+    unless upToDate do
+      IO.FS.writeBinFile dst contents
+  return .pure pkg.bootstrapIncludeDir
+
+lean_lib LeanExport where
+  libName := "LeanExport"
+  globs := #[.andSubmodules `LeanExport]
+  defaultFacets := #[LeanLib.sharedFacet]
+
+@[default_target]
+lean_lib Lake where
+  libName := "Lake"
+  defaultFacets := #[LeanLib.sharedFacet]
+  -- `Lake.Check` links the export parser, which is vendored in-tree as `LeanExport`
+  needs := #[LeanExport]
+
+@[default_target]
+lean_exe lake where
+  root := `LakeMain
+  needs := #[Lake]
+  supportInterpreter := true

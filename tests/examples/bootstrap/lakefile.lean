@@ -1,8 +1,10 @@
+-- Modified for Blake (2026-10-29): Lake's sources live at the repository root
+-- rather than under `src/lake`.
 import Lake
 open System Lake DSL
 
 package lake where
-  srcDir := ".." / ".." / ".." / ".." / "src" / "lake"
+  srcDir := ".." / ".." / ".."
 
 lean_lib Lake
 

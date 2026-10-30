@@ -1,3 +1,102 @@
+# Blake
+
+Blake is an independent fork of [Lake](https://github.com/leanprover/lean4/tree/master/src/lake),
+the build system and package manager for Lean 4. It was extracted from the
+[Lean 4 repository](https://github.com/leanprover/lean4) at release `v4.35.0`
+with Lake's complete git history intact, going back to the original
+`leanprover/lake` repository, and builds standalone against the Lean toolchain
+pinned in [`lean-toolchain`](lean-toolchain).
+
+The code is unchanged from upstream Lake except where noted below; the `Lake`
+module namespace and the `lake` executable name are kept.
+
+## License
+
+Blake is distributed under the Apache License 2.0, the same license as Lean 4;
+see [`LICENSE`](LICENSE). The original work is copyright its respective authors
+as recorded in the copyright header of each file (Mac Malone, Microsoft
+Corporation, Lean FRO LLC, and other Lean 4 contributors). Per the license, files
+modified in Blake carry a notice saying so.
+
+## Provenance and changes from upstream
+
+The history was produced with `git filter-repo` on `leanprover/lean4`:
+
+| Lean 4 path | Blake path |
+|---|---|
+| `src/lake/` | repository root (`Lake/`, `Lake.lean`, `LakeMain.lean`, `schemas/`, this README) |
+| `src/LeanExport.lean`, `src/LeanExport/` | `LeanExport.lean`, `LeanExport/` (export-file parser used by `lake check`) |
+| `tests/lake/` | `tests/` |
+
+The pre-2023 history of the original `leanprover/lake` repository, which Lean 4
+merged with `git subtree`, is grafted beneath the merge commit so that the
+history is continuous. Release tags (`v4.x.y`) point at Lake's state in each Lean
+release.
+
+Added in Blake:
+
+* `lakefile.lean` builds Blake as a `bootstrap` package (as Lake is built inside
+  the Lean tree, see `src/lakefile.toml.in` upstream), so that native symbols
+  are not namespaced by package name and the resulting `libLake` shared library
+  can be loaded by `lean` as a plugin, exactly as a source-built `lake` expects
+  of its own installation. The `leanInclude` target copies Lean's C headers into
+  the bootstrap include directory.
+* `lean-toolchain`, `LICENSE`, `.gitignore`, `flake.nix`/`flake.lock`.
+
+Modified from upstream (each file carries a "Modified for Blake" notice):
+
+* `Lake/CLI/Main.lean`: `lake lint --builtin-only` and `lake shake` now include
+  the Lean toolchain's library directory in their module search path. Upstream
+  only adds the directory of the running `lake`, which is the same directory
+  only when `lake` is installed next to `lean`.
+* `tests/run_test.sh`: builds `lake` from the repository root instead of a
+  `tests/lakefile.toml`, which was removed.
+* `tests/examples/bootstrap/lakefile.lean`: Lake's sources are at the repository
+  root rather than `src/lake`.
+
+## Building
+
+With the toolchain from `lean-toolchain` installed (e.g. via `elan`):
+
+```
+lake build
+```
+
+This produces `.lake/build/bin/lake` (the Blake executable) plus
+`.lake/build/lib/lean/libLake.so` and the `Lake.*` `.olean` files. Blake can
+then build any Lean package, including itself:
+
+```
+.lake/build/bin/lake --version
+cd some-lean-package && /path/to/blake/.lake/build/bin/lake build
+```
+
+A `nix develop` shell provides `elan` and the tools used by the test suite.
+
+On NixOS, the `elan` from nixpkgs wraps the toolchain's own `lake` to export
+`LEAN_CC=<toolchain>/bin/cc` so that executables it links use a NixOS-compatible
+dynamic loader. Export the same variable when running the Blake executable:
+
+```
+export LEAN_CC="$(lean --print-prefix)/bin/cc"
+```
+
+## Testing
+
+The Lake test suite lives in `tests/` (`tests/tests/*`, `tests/examples/*`,
+`tests/extra/*`); each test directory has a `test.sh`. Run one with:
+
+```
+tests/run_test.sh tests/init
+tests/run_test.sh examples/hello
+```
+
+`run_test.sh` builds Blake if needed and runs the test under `lake env`. Set
+`LAKE=/path/to/lake` to test another executable. As in upstream CI, the
+`bootstrap`, `toolchain`, and `online` tests are slow or need network access.
+
+---
+
 # Lake
 
 Lake (Lean Make) is the new build system and package manager for Lean 4.
