@@ -79,6 +79,8 @@ jobs:
           set +e
           git worktree add --detach "$RUNNER_TEMP/blake-base" "${{ steps.base.outputs.sha }}"
           cd "$RUNNER_TEMP/blake-base"
+          # a base that predates the runner script is measured with the PR's copy of it
+          test -x tests/run_all.sh || cp "$GITHUB_WORKSPACE/tests/run_all.sh" tests/run_all.sh
           lake build && tests/run_all.sh -j 4 -o "$GITHUB_WORKSPACE/tests/.out-main"
           echo "base suite exit status $? (informational)"
           test -s "$GITHUB_WORKSPACE/tests/.out-main/results.txt" || { echo "no base results produced"; exit 1; }
