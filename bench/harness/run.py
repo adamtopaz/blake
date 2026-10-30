@@ -25,11 +25,14 @@ candidate whose artifacts ever differ, whose builds fail, or which leaves
 processes behind is INCORRECT regardless of speed.
 
 Verdict (printed and stored): per corpus and scenario the candidate is compared
-with `main` using t = max(3%, main's (max - min) / median) (5% for `cold`, which
-runs once): improved iff candidate < (1 - t) * main, regressed iff
+with `main` using the threshold t = max(floor, spread/median of main,
+spread/median of the candidate), where spread = max - min over the runs and the
+floor is 5% when main's median is under 2 s, 3% otherwise, and 7% for `cold`
+(which runs once): improved iff candidate < (1 - t) * main, regressed iff
 candidate > (1 + t) * main. Overall: `failure` if anything is incorrect or any
 scenario regressed; `success` if at least one primary scenario improved and
-nothing regressed; otherwise `neutral`.
+nothing regressed; otherwise `neutral`. The cheap scenarios (noop, leaf) are run
+--repeat-fast times (default 10), the expensive ones --repeat times (default 3).
 
 Typical use:
   python3 bench/harness/run.py                 # standard sweep: medium-*, lake+main+candidate, repeat 3
@@ -85,7 +88,10 @@ DEFAULT_TOOLS = "lake,main,candidate"
 ARTIFACT_EXTS = (".olean", ".ilean", ".c")
 BUILD_TIMEOUT_S = 1800
 NOISE_FLOOR = 0.03
-COLD_THRESHOLD = 0.05
+NOISE_FLOOR_FAST = 0.05   # scenarios whose main median is under FAST_SECONDS
+FAST_SECONDS = 2.0
+COLD_THRESHOLD = 0.07
+FAST_SCENARIOS = ("noop", "leaf")
 SCRUB_PREFIXES = ("LAKE_", "LEAN_")
 SCRUB_EXACT = ("LEAN", "ELAN_TOOLCHAIN", "XDG_CACHE_HOME", "TMPDIR", "CC", "AR", "CURL")
 
@@ -560,7 +566,8 @@ def summarize(runs: list[dict]) -> dict:
 
 
 def bench_tool(tool_name: str, tool: dict, cfg_name: str, src: Path, corpus: dict, targets: dict,
-               scenarios: list[str], repeat: int, use_scope: bool, mem_gb: int | None, extra_env: dict) -> tuple[dict, dict]:
+               scenarios: list[str], repeat: int, repeat_fast: int, use_scope: bool, mem_gb: int | None,
+               extra_env: dict) -> tuple[dict, dict]:
     """Returns (per-scenario results, manifests keyed by step name)."""
     d = WORK / "corpora" / cfg_name / tool_name
     fresh_copy(src, d)
@@ -586,7 +593,7 @@ def bench_tool(tool_name: str, tool: dict, cfg_name: str, src: Path, corpus: dic
         if scen == "cold":
             continue
         runs = []
-        for i in range(repeat):
+        for i in range(repeat_fast if scen in FAST_SCENARIOS else repeat):
             if scen == "leaf":
                 stamp += 1
                 apply_edit(d, corpus, [targets["leaf"]], stamp)
@@ -678,7 +685,9 @@ def verdicts(measurements: dict, correctness: dict, tools: list[str]) -> dict:
             if scen == "cold":
                 t = COLD_THRESHOLD
             else:
-                t = max(NOISE_FLOOR, (m["max_wall_s"] - m["min_wall_s"]) / m["median_wall_s"])
+                floor = NOISE_FLOOR_FAST if m["median_wall_s"] < FAST_SECONDS else NOISE_FLOOR
+                t = max(floor, (m["max_wall_s"] - m["min_wall_s"]) / m["median_wall_s"],
+                        (c["max_wall_s"] - c["min_wall_s"]) / c["median_wall_s"])
             ratio = m["median_wall_s"] / c["median_wall_s"]
             state = "improved" if c["median_wall_s"] < (1 - t) * m["median_wall_s"] else (
                 "regressed" if c["median_wall_s"] > (1 + t) * m["median_wall_s"] else "same")
@@ -763,7 +772,8 @@ def main() -> None:
     ap.add_argument("--tools", default=DEFAULT_TOOLS, help="comma-separated: lake, main, candidate")
     ap.add_argument("--main-ref", default=None, help="git ref for `main` (default: merge-base of HEAD and origin/main)")
     ap.add_argument("--scenarios", default=",".join(ALL_SCENARIOS))
-    ap.add_argument("--repeat", type=int, default=3, help="runs per incremental scenario (median reported)")
+    ap.add_argument("--repeat", type=int, default=3, help="runs per expensive incremental scenario (swarm, hub); median reported")
+    ap.add_argument("--repeat-fast", type=int, default=10, help="runs per cheap incremental scenario (noop, leaf)")
     ap.add_argument("--cpus", default=None, help="CPU list to pin to, e.g. 0-15 (default: bench/local.json or half)")
     ap.add_argument("--mem-gb", type=int, default=None, help="memory cap in GiB (default: bench/local.json or half)")
     ap.add_argument("--out", default=None, help="result JSON path (default: research/results/ for standard runs, else bench/work/results/)")
@@ -821,8 +831,8 @@ def main() -> None:
         nonstandard.append("tools")
     if scenarios != list(ALL_SCENARIOS):
         nonstandard.append("scenarios")
-    if args.repeat < 3:
-        nonstandard.append("repeat<3")
+    if args.repeat < 3 or args.repeat_fast < 10:
+        nonstandard.append("repeat<3 or repeat-fast<10")
     if dirty:
         nonstandard.append("dirty tree")
     if not affinity_ok:
@@ -850,7 +860,7 @@ def main() -> None:
         manifests_all[cfg_name] = {}
         for tool_name in order:
             res, manifests = bench_tool(tool_name, tools[tool_name], cfg_name, src, corpus, targets, scenarios,
-                                        args.repeat, use_scope, caps["mem_gb"], extra_env)
+                                        args.repeat, args.repeat_fast, use_scope, caps["mem_gb"], extra_env)
             measurements[cfg_name][tool_name] = res
             manifests_all[cfg_name][tool_name] = manifests
             if not args.keep:
@@ -884,6 +894,9 @@ def main() -> None:
         "tool_order": tool_names,
         "tool_order_per_corpus": orders,
         "repeat": args.repeat,
+        "repeat_fast": args.repeat_fast,
+        "noise_rule": {"floor": NOISE_FLOOR, "floor_fast": NOISE_FLOOR_FAST, "fast_seconds": FAST_SECONDS,
+                       "cold_threshold": COLD_THRESHOLD},
         "scenarios": scenarios,
         "corpora": corpora_meta,
         "measurements": measurements,

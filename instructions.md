@@ -168,16 +168,18 @@ It prints a table, `speedup ... vs main` and `vs lake` lines, one `verdict` line
 corpus and scenario, and a final `verdict: success|neutral|failure` line, and writes
 `research/results/<timestamp>-<machine>-<commit>.json`. The rule it applies:
 
-- Per corpus and scenario, the candidate is compared with `main` using the
-  threshold `t = max(3%, main's (max − min) / median)` (`5%` for `cold`, which runs
-  once): **improved** if the candidate's median is below `(1 − t) × main`,
-  **regressed** if above `(1 + t) × main`.
+- Per corpus and scenario, the candidate's median is compared with `main`'s using
+  the threshold `t = max(floor, main's (max − min) / median, candidate's
+  (max − min) / median)`, where the floor is 5% for scenarios under 2 s, 3%
+  otherwise, and 7% for `cold` (which runs once): **improved** if the candidate
+  is below `(1 − t) × main`, **regressed** if above `(1 + t) × main`. The cheap
+  scenarios (`noop`, `leaf`) are run 10 times, the expensive ones 3 times.
 - **success**: at least one primary scenario improved on at least one corpus and
   nothing regressed anywhere (including `cold`), with all correctness checks
   passing. **failure**: anything regressed or any check failed. Otherwise
   **neutral**.
 
-If a result looks like noise, rerun with `--repeat 5`. **Commit every result file
+If a result looks like noise, rerun with `--repeat 5 --repeat-fast 20`. **Commit every result file
 the standard sweep writes**, including reruns and the ones you do not like. Never
 tune the benchmark, corpora, or caps to make a result look better.
 

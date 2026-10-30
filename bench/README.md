@@ -42,8 +42,9 @@ gigantic Lean project, without doing anything Lake would not do?* See
 | `break` | rename the hub's `val_ge`, build (must fail), restore, build | untimed; every dependent must still be rebuilt when it must |
 
 Edits accumulate (each one is a new theorem with a fresh name), so the tools see the
-same sequence of edits and no restore step is needed. Incremental scenarios are run
-`--repeat` times (default 3) and the median is reported. Tools are measured in a
+same sequence of edits and no restore step is needed. The cheap scenarios (`noop`,
+`leaf`) are run `--repeat-fast` times (default 10) and the expensive ones
+(`swarm`, `hub`) `--repeat` times (default 3); medians are reported. Tools are measured in a
 rotated order per corpus so no tool always runs last on a warm machine.
 
 ## Caps and comparability
@@ -79,13 +80,17 @@ correct, which is deliberate: that is a real optimization.
 ## Standard runs and the verdict
 
 A run is **standard** when it uses the default corpora, tools, and scenarios,
-`--repeat` of at least 3, a clean git tree, and an enforced CPU cap. Standard runs
+`--repeat` of at least 3 and `--repeat-fast` of at least 10, a clean git tree, and
+an enforced CPU cap. Standard runs
 are written to `research/results/` and are the only ones the leaderboard counts;
 everything else goes to `bench/work/results/` (or `--out`).
 
-The verdict compares the candidate with `main` per corpus and scenario with the
-threshold `t = max(3%, main's (max − min) / median)` (`5%` for `cold`): improved
-below `(1 − t)`, regressed above `(1 + t)`. Overall: `failure` if any correctness
+The verdict compares the candidate's median with `main`'s per corpus and scenario
+with the threshold `t = max(floor, main's spread / median, candidate's spread /
+median)` (spread = max − min; floor 5% under 2 s, 3% otherwise, 7% for `cold`):
+improved below `(1 − t)`, regressed above `(1 + t)`. Two builds of identical
+source measured against each other on this harness stay within these thresholds;
+that is what they were calibrated on. Overall: `failure` if any correctness
 check failed or anything regressed; `success` if a primary scenario improved and
 nothing regressed; otherwise `neutral`. The harness exits with status 2 on
 `failure`.
