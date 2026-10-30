@@ -3,7 +3,7 @@
 - **Date:** 2026-10-30
 - **Author:** Claude (Opus 5.5) with Adam Topaz, machine `2e698309` (i9-14900K, 16 of 32 CPUs, 32 GB cap)
 - **Outcome:** success
-- **Branch / PR:** research/olean-githash — (pending)
+- **Branch / PR:** research/olean-githash — https://github.com/adamtopaz/blake/pull/2
 - **Result files:** research/results/20261030T121031Z-2e698309-4923feb.json
 
 ## Hypothesis
