@@ -12,6 +12,7 @@ public import Lake.Config.Defaults
 public import Lake.Util.NativeLib
 import Init.Data.UInt.Lemmas
 import Init.Data.String.Modify
+import Init.Data.String.Legacy
 import Init.System.Platform
 
 open System Lean.Compiler.FFI
@@ -240,6 +241,33 @@ public def findLeanSysroot? (lean := "lean") : BaseIO (Option FilePath) := do
       pure <| none
   act.catchExceptions fun _ => pure none
 
+/-
+Modified for Blake (2026-10-30): `initOleanHasLeanGithash` (used by `LeanInstall.get`
+and `findElanLeanSysroot?`).
+
+An `.olean` header is `olean`, a format version byte (2), a flags byte, the
+Lean version string padded to 33 bytes, and the 40-byte githash of the Lean
+that wrote it. `lean` refuses to import an `.olean` whose header githash differs
+from its own ("incompatible header"), so in a working installation the githash
+in `Init.olean` is the one `lean --githash` prints.
+-/
+
+/--
+Whether the `Init.olean` of the Lean installation at `sysroot` records this
+Lake's own `Lean.githash` (whose header layout is known), i.e., whether that
+installation's `lean --githash` would print `Lean.githash`.
+-/
+def initOleanHasLeanGithash (sysroot : FilePath) : BaseIO Bool := do
+  let githash := Lean.githash.toUTF8.data
+  if githash.size != 40 then
+    return false
+  EIO.catchExceptions (h := fun _ => pure false) do
+    let h ← IO.FS.Handle.mk (sysroot / "lib" / "lean" / "Init.olean") .read
+    let hdr ← h.read 80
+    return hdr.size == 80 &&
+      hdr.data.extract 0 6 == #[0x6f, 0x6c, 0x65, 0x61, 0x6e, 2] && -- `olean`, version 2
+      hdr.data.extract 40 80 == githash
+
 /--
 Construct the `LeanInstall` object for the given Lean sysroot.
 
@@ -277,7 +305,7 @@ public def LeanInstall.get (sysroot : FilePath) (collocated : Bool := false) : B
     -- spent ~30 ms per invocation running `lean --githash`. When the toolchain's
     -- `Init.olean` header records this Lake's own `Lean.githash`, that is what
     -- `lean --githash` prints (see `initOleanHasLeanGithash`), so skip the process.
-    else if (← initOleanHasLeanGithash) then
+    else if (← initOleanHasLeanGithash sysroot) then
       pure Lean.githash
     else
       -- Remark: This is expensive (at least on Windows), so try to avoid it.
@@ -285,25 +313,6 @@ public def LeanInstall.get (sysroot : FilePath) (collocated : Bool := false) : B
   let ar ← findAr
   setCc {sysroot, githash, ar}
 where
-  /-
-  An `.olean` header is `olean`, a format version byte (2), a flags byte, the
-  Lean version string padded to 33 bytes, and the 40-byte githash of the Lean
-  that wrote it. `lean` refuses to import an `.olean` whose header githash differs
-  from its own ("incompatible header"), so in a working installation the githash
-  in `Init.olean` is the one `lean --githash` prints. It is trusted only when it
-  equals this Lake's `Lean.githash`, whose header layout is known; otherwise Lake
-  asks `lean` as before.
-  -/
-  initOleanHasLeanGithash : BaseIO Bool := do
-    let githash := Lean.githash.toUTF8.data
-    if githash.size != 40 then
-      return false
-    EIO.catchExceptions (h := fun _ => pure false) do
-      let h ← IO.FS.Handle.mk (sysroot / "lib" / "lean" / "Init.olean") .read
-      let hdr ← h.read 80
-      return hdr.size == 80 &&
-        hdr.data.extract 0 6 == #[0x6f, 0x6c, 0x65, 0x61, 0x6e, 2] && -- `olean`, version 2
-        hdr.data.extract 40 80 == githash
   getGithash := do
     EIO.catchExceptions (h := fun _ => pure "") do
       let out ← IO.Process.output {
@@ -382,6 +391,154 @@ public def getLakeInstall? (lake : FilePath) : BaseIO (Option LakeInstall) := do
     return some lake
   return none
 
+/-
+Modified for Blake (2026-10-30): `findElanLeanSysroot?` and its helpers. A Lake
+that is not installed next to `lean` ran `lean --print-prefix` on every
+invocation (~35 ms through elan's proxy, most of it `lean` initializing). In the
+common, unambiguous case the answer follows from elan's own rules (elan v4.2.1,
+`Cfg::find_override_toolchain_or_default`), so Lake reads it off the file system.
+-/
+
+/-- Whether `c` may appear in the `owner/repo` origin of an elan toolchain name. -/
+private def isElanOriginChar (c : Char) : Bool :=
+  c.isAlphanum || c == '-' || c == '_'
+
+/-- Whether `c` may appear in the release of an elan toolchain name. -/
+private def isElanReleaseChar (c : Char) : Bool :=
+  c.isAlphanum || c == '-' || c == '.'
+
+/--
+If `name` names a pinned release, `owner/repo:v<digit>...` (e.g.,
+`leanprover/lean4:v4.35.0`), its elan toolchain directory name and its release.
+Channels (`stable`, `nightly`, ...), bare names, paths, and anything else are `none`.
+-/
+private def parsePinnedElanToolchain? (name : String) : Option (String × String) :=
+  match name.splitOn ":" with
+  | [origin, release] =>
+    match origin.splitOn "/", release.toList with
+    | [owner, repo], 'v' :: d :: _ =>
+      if !owner.isEmpty && owner.all isElanOriginChar &&
+          !repo.isEmpty && repo.all isElanOriginChar &&
+          d.isDigit && release.all isElanReleaseChar then
+        some ((toolchain2Dir name).toString, release)
+      else
+        none
+    | _, _ => none
+  | _ => none
+
+/--
+Whether elan's `settings.toml` (given as text) defines no directory overrides.
+Errs on the side of `false`: any line mentioning `overrides` other than an
+empty `[overrides]` table counts as an override.
+-/
+private def elanSettingsHaveNoOverrides (settings : String) : Bool := Id.run do
+  let mut inOverrides := false
+  for line in settings.splitOn "\n" do
+    let line := line.trimAscii.copy
+    if line.isEmpty || line.startsWith "#" then
+      continue
+    if line == "[overrides]" then
+      inOverrides := true
+    else if inOverrides || (line.splitOn "overrides").length > 1 then
+      return false
+    else if line.startsWith "[" then
+      inOverrides := false
+  return true
+
+/-- The first `PATH` entry named `name`, searched the way `execvp` does. -/
+private def findInPath? (name : String) : BaseIO (Option FilePath) := do
+  let some path ← IO.getEnv "PATH" | return none
+  for dir in path.splitOn ":" do
+    let file := FilePath.mk (if dir.isEmpty then "." else dir) / name
+    if (← file.pathExists) then
+      return some file
+  return none
+
+/--
+Whether `lean` (a `PATH` entry) is elan's proxy: the same file as the `elan`
+next to it, which elan's installer creates as a hard link (or a symbolic link,
+as package managers do).
+-/
+private def isElanProxy (lean : FilePath) : BaseIO Bool := do
+  let some dir := lean.parent | return false
+  EIO.catchExceptions (h := fun _ => pure false) do
+    let lean ← IO.FS.realPath lean
+    let elan ← IO.FS.realPath (dir / "elan")
+    if lean == elan then
+      return true
+    let l ← lean.metadata
+    let e ← elan.metadata
+    return l.type == .file && e.type == .file && l.numLinks > 1 &&
+      l.byteSize == e.byteSize && l.modified == e.modified
+
+/--
+The sysroot that `lean --print-prefix` would print, found without running it,
+when `lean` in `PATH` is elan's proxy and elan's choice of toolchain is
+unambiguous; otherwise `none`, and the caller asks `lean`.
+
+Elan picks, for the canonical working directory: `ELAN_TOOLCHAIN` if set; else,
+walking up from the directory, the first directory override in its
+`settings.toml`, `lean-toolchain` file, or `leanpkg.toml` file; else its default
+toolchain. A `lean-toolchain` name is first tried as a path to a toolchain
+directory, then as a linked toolchain, then as a release, which is installed if
+missing. This function only answers when there is no `ELAN_TOOLCHAIN`, no
+override at all, no `leanpkg.toml` on the way, the nearest `lean-toolchain`
+pins a release (see `parsePinnedElanToolchain?`) that is installed and that no
+path or linked toolchain shadows, and that release's `Init.olean` records this
+Lake's `Lean.githash`. Like `lean --print-prefix`, it reports the directory
+above the real location of the toolchain's `bin/lean`.
+-/
+public def findElanLeanSysroot? : BaseIO (Option FilePath) := do
+  if Platform.isWindows then
+    return none
+  if let some tc ← IO.getEnv "ELAN_TOOLCHAIN" then
+    unless tc.isEmpty do
+      return none
+  let some lean ← findInPath? "lean" | return none
+  unless (← isElanProxy lean) do
+    return none
+  EIO.catchExceptions (h := fun _ => pure none) do
+    let cwd ← IO.currentDir
+    let elanHome ← do
+      if let some home ← IO.getEnv "ELAN_HOME" then
+        if home.isEmpty then
+          return none
+        pure <| if FilePath.isAbsolute home then FilePath.mk home else cwd / home
+      else if let some home ← IO.getEnv "HOME" then
+        if home.isEmpty then
+          return none
+        pure <| FilePath.mk home / ".elan"
+      else
+        return none
+    unless elanSettingsHaveNoOverrides (← IO.FS.readFile (elanHome / "settings.toml")) do
+      return none
+    let toolchainsDir := elanHome / "toolchains"
+    let toolchainsDirReal ← IO.FS.realPath toolchainsDir
+    let mut dir ← IO.FS.realPath cwd
+    for _ in [0:1024] do
+      let toolchainFile := dir / "lean-toolchain"
+      if (← toolchainFile.pathExists) then
+        let name := ((← IO.FS.readFile toolchainFile).splitOn "\n").headD "" |>.trimAscii.copy
+        let some (tcDir, release) := parsePinnedElanToolchain? name | return none
+        if (← (dir / name).pathExists) then
+          return none -- possibly a path toolchain
+        if (← toolchainsDir.readDir).any (·.fileName == release) then
+          return none -- possibly a linked toolchain
+        let leanExe := toolchainsDir / tcDir / "bin" / "lean"
+        unless (← leanExe.metadata).type == .file do
+          return none
+        let some sysroot := (← IO.FS.realPath leanExe).parent >>= (·.parent) | return none
+        unless (← initOleanHasLeanGithash sysroot) do
+          return none
+        return some sysroot
+      if (← (dir / "leanpkg.toml").pathExists) then
+        return none
+      let some parent := dir.parent | return none
+      if parent == dir || parent == toolchainsDir || parent == toolchainsDirReal then
+        return none
+      dir := parent
+    return none
+
 /--
 Attempt to detect Lean's installation by using the `LEAN` and `LEAN_SYSROOT`
 environment variables.
@@ -404,7 +561,16 @@ public def findLeanInstall? : BaseIO (Option LeanInstall) := do
         pure lean
     else
       pure "lean"
-  if let some sysroot ← findLeanSysroot? lean then
+  -- Modified for Blake (2026-10-30): try `findElanLeanSysroot?` before running `lean`.
+  let sysroot? ← do
+    if lean == "lean" then
+      if let some sysroot ← findElanLeanSysroot? then
+        pure (some sysroot)
+      else
+        findLeanSysroot? lean
+    else
+      findLeanSysroot? lean
+  if let some sysroot := sysroot? then
     return some <| ← LeanInstall.get sysroot
   return none
 
