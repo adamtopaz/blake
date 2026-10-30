@@ -273,12 +273,37 @@ public def LeanInstall.get (sysroot : FilePath) (collocated : Bool := false) : B
   let githash ← do
     if collocated then
       pure Lean.githash
+    -- Modified for Blake (2026-10-30): a Lake that is not installed next to `lean`
+    -- spent ~30 ms per invocation running `lean --githash`. When the toolchain's
+    -- `Init.olean` header records this Lake's own `Lean.githash`, that is what
+    -- `lean --githash` prints (see `initOleanHasLeanGithash`), so skip the process.
+    else if (← initOleanHasLeanGithash) then
+      pure Lean.githash
     else
       -- Remark: This is expensive (at least on Windows), so try to avoid it.
       getGithash
   let ar ← findAr
   setCc {sysroot, githash, ar}
 where
+  /-
+  An `.olean` header is `olean`, a format version byte (2), a flags byte, the
+  Lean version string padded to 33 bytes, and the 40-byte githash of the Lean
+  that wrote it. `lean` refuses to import an `.olean` whose header githash differs
+  from its own ("incompatible header"), so in a working installation the githash
+  in `Init.olean` is the one `lean --githash` prints. It is trusted only when it
+  equals this Lake's `Lean.githash`, whose header layout is known; otherwise Lake
+  asks `lean` as before.
+  -/
+  initOleanHasLeanGithash : BaseIO Bool := do
+    let githash := Lean.githash.toUTF8.data
+    if githash.size != 40 then
+      return false
+    EIO.catchExceptions (h := fun _ => pure false) do
+      let h ← IO.FS.Handle.mk (sysroot / "lib" / "lean" / "Init.olean") .read
+      let hdr ← h.read 80
+      return hdr.size == 80 &&
+        hdr.data.extract 0 6 == #[0x6f, 0x6c, 0x65, 0x61, 0x6e, 2] && -- `olean`, version 2
+        hdr.data.extract 40 80 == githash
   getGithash := do
     EIO.catchExceptions (h := fun _ => pure "") do
       let out ← IO.Process.output {
