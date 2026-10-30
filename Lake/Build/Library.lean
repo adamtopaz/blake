@@ -36,8 +36,16 @@ That is, the modules from `getModuleArray` plus their local transitive imports.
 partial def LeanLib.recCollectLocalModules
   (self : LeanLib) : FetchM (Job (Array Module))
 := ensureJob do
+  -- Modified for Blake (2026-10-30): the walk below waits for each module's header
+  -- (read, hash, parse) before it moves on, so headers were processed about one at
+  -- a time. Start the header jobs of all roots, and of each module's local imports
+  -- before descending into them, so they run in parallel; the walk fetches exactly
+  -- these jobs anyway (fetches are memoized), so the set of jobs is unchanged.
+  let roots ← self.getModuleArray
+  for mod in roots do
+    discard <| mod.imports.fetch
   let mut col : ModuleCollection := {}
-  for mod in (← self.getModuleArray) do
+  for mod in roots do
     col ← go mod col (viaImport := false)
   if col.hasErrors then
     -- This is not considered a fatal error because we want the modules
@@ -54,6 +62,9 @@ where
       let some imps ← (← root.imports.fetch).waitUnlessCanceled?
         | let col' := {col with hasErrors := true}
           return if viaImport then col' else {col' with mods := col'.mods.push root}
+      for mod in imps do
+        if mod.lib.name = self.name && !col.modSet.contains mod then
+          discard <| mod.imports.fetch
       for mod in imps do
         if mod.lib.name = self.name then
           col ← go mod col (viaImport := true)
