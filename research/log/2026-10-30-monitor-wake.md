@@ -3,7 +3,7 @@
 - **Date:** 2026-10-30
 - **Author:** Claude (Opus 5.5) with Adam Topaz, machine `2e698309` (i9-14900K, 16 of 32 CPUs, 32 GB cap)
 - **Outcome:** success
-- **Branch / PR:** research/monitor-wake — (pending)
+- **Branch / PR:** research/monitor-wake — https://github.com/adamtopaz/blake/pull/4
 - **Result files:** research/results/20261030T151332Z-2e698309-4bc612e.json
 
 ## Hypothesis
