@@ -222,9 +222,22 @@ gh pr create --repo adamtopaz/blake --base main --head <your-github-user>:resear
 results. Maintainers with push access may push the branch to `origin` instead.) If
 `gh` is unavailable, push the branch and print the compare URL
 `https://github.com/adamtopaz/blake/compare/main...<your-github-user>:research/<slug>`
-so a human can open the PR. The maintainer reviews and merges; log-only PRs are
-merged quickly. If `main` moves before your PR is merged, the maintainer may ask
-you to rebase and re-measure.
+so a human can open the PR.
+
+Before pushing, run the same hygiene check CI will run:
+
+```sh
+python3 .github/scripts/pr_check.py --base origin/main --title "research: <one line>"
+```
+
+CI (`.github/workflows/pr-check.yml`) then builds Blake, runs Lake's test suite
+against the base branch's results, checks artifact identity and the breaking-edit
+rule against stock Lake on the small corpora, and runs the hygiene check. It never
+measures performance; your result file is the measurement. Fix red checks before
+asking for review. The maintainer reviews and merges; log-only PRs are merged
+quickly. If `main` moves before your PR is merged, the maintainer may ask you to
+rebase and re-measure. After a merge, a workflow regenerates
+`research/results/LEADERBOARD.md`.
 
 ## Hard rules, in one place
 

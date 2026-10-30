@@ -62,15 +62,21 @@ if [ "$fail" -gt 0 ]; then
   grep '^FAIL' "$OUT/results.txt"
   rc=1
 fi
-if [ -n "$COMPARE" ] && [ -f "$COMPARE/results.txt" ]; then
-  newly=$(comm -12 <(grep '^PASS' "$COMPARE/results.txt" | awk '{print $2}' | sort) \
-                   <(grep '^FAIL' "$OUT/results.txt" | awk '{print $2}' | sort) || true)
-  if [ -n "$newly" ]; then
-    echo "NEWLY FAILING compared to $COMPARE:"
-    echo "$newly"
-    rc=1
+if [ -n "$COMPARE" ]; then
+  if [ ! -f "$COMPARE/results.txt" ]; then
+    echo "no baseline results at $COMPARE/results.txt; judging on failures alone"
   else
-    echo "no test that passed in $COMPARE fails now"
+    # With a baseline, only tests that passed there and fail now count.
+    newly=$(comm -12 <(grep '^PASS' "$COMPARE/results.txt" | awk '{print $2}' | sort) \
+                     <(grep '^FAIL' "$OUT/results.txt" | awk '{print $2}' | sort) || true)
+    if [ -n "$newly" ]; then
+      echo "NEWLY FAILING compared to $COMPARE:"
+      echo "$newly"
+      rc=1
+    else
+      echo "no test that passed in $COMPARE fails now"
+      rc=0
+    fi
   fi
 fi
 exit $rc

@@ -1,0 +1,40 @@
+# Regenerates research/results/LEADERBOARD.md whenever results land on main, so
+# nobody has to commit it by hand (and PRs never conflict on it).
+name: Leaderboard
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'research/results/**'
+      - 'bench/harness/leaderboard.py'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: leaderboard
+  cancel-in-progress: false
+
+jobs:
+  regenerate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Regenerate
+        run: python3 bench/harness/leaderboard.py
+      - name: Commit if changed
+        run: |
+          if git diff --quiet -- research/results/LEADERBOARD.md; then
+            echo "leaderboard unchanged"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add research/results/LEADERBOARD.md
+          git commit -m "leaderboard: regenerate from research/results"
+          git push

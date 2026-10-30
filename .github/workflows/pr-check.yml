@@ -1,0 +1,106 @@
+# Correctness and hygiene checks for pull requests. This workflow never measures
+# performance: hosted runners are shared and noisy, and the research loop's
+# verdict comes from the contributor's own machine (see instructions.md §6).
+name: PR check
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-check-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BASE_REF: ${{ github.base_ref || 'main' }}
+
+jobs:
+  hygiene:
+    name: PR hygiene
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check the PR against the research-loop rules
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: python3 .github/scripts/pr_check.py --base "origin/$BASE_REF" --title "$PR_TITLE"
+
+  build-test-correctness:
+    name: Build, Lake test suite, artifact identity
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install elan
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+
+      - name: Cache the Lean toolchain
+        uses: actions/cache@v4
+        with:
+          path: ~/.elan/toolchains
+          key: elan-${{ runner.os }}-${{ hashFiles('lean-toolchain') }}
+
+      - name: Install the pinned toolchain
+        run: elan toolchain install "$(cat lean-toolchain)"
+
+      - name: Install tools used by the test suite
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bubblewrap jq
+          # Ubuntu 24.04 restricts unprivileged user namespaces, which bubblewrap needs.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
+      - name: Build Blake
+        run: |
+          lake build
+          .lake/build/bin/lake --version
+
+      - name: Resolve the base commit
+        id: base
+        run: echo "sha=$(git rev-parse "origin/$BASE_REF")" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the base branch's test results
+        id: base-tests
+        uses: actions/cache@v4
+        with:
+          path: tests/.out-main
+          key: tests-base-${{ runner.os }}-${{ hashFiles('lean-toolchain') }}-${{ steps.base.outputs.sha }}
+
+      - name: Run the test suite on the base branch (cache miss only)
+        if: steps.base-tests.outputs.cache-hit != 'true'
+        run: |
+          git worktree add --detach "$RUNNER_TEMP/blake-base" "${{ steps.base.outputs.sha }}"
+          cd "$RUNNER_TEMP/blake-base"
+          lake build
+          tests/run_all.sh -j 4 -o "$GITHUB_WORKSPACE/tests/.out-main" || true
+
+      - name: Run the test suite (no test that passes on the base may fail)
+        run: tests/run_all.sh -j 4 --compare "$GITHUB_WORKSPACE/tests/.out-main"
+
+      - name: Artifacts identical to stock Lake, breaking edits fail alike
+        run: |
+          python3 bench/harness/run.py --quick --tools lake,candidate \
+            --cpus 0-3 --mem-gb 8 --repeat 1 --repeat-fast 2 --label ci
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs
+          path: |
+            tests/.out
+            tests/.out-main
+            bench/work/results
+          if-no-files-found: ignore
