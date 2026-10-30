@@ -6,7 +6,8 @@ the same machine, under the same CPU and memory caps, on generated corpora
 (see `bench/gen/generate.py`), decides whether the candidate improved on `main`,
 and writes one JSON result file.
 
-Scenarios (each tool gets its own fresh copy of the corpus):
+Scenarios (each tool gets its own fresh copy of the corpus; the tools are
+interleaved run by run so that drift of the machine affects them all alike):
   cold   full build from nothing (context; secondary target)
   noop   `build` with nothing changed: pure build-tool overhead
   leaf   edit a module nobody imports, rebuild
@@ -25,14 +26,16 @@ candidate whose artifacts ever differ, whose builds fail, or which leaves
 processes behind is INCORRECT regardless of speed.
 
 Verdict (printed and stored): per corpus and scenario the candidate is compared
-with `main` using the threshold t = max(floor, spread/median of main,
-spread/median of the candidate), where spread = max - min over the runs and the
-floor is 5% when main's median is under 2 s, 3% otherwise, and 7% for `cold`
-(which runs once): improved iff candidate < (1 - t) * main, regressed iff
-candidate > (1 + t) * main. Overall: `failure` if anything is incorrect or any
-scenario regressed; `success` if at least one primary scenario improved and
-nothing regressed; otherwise `neutral`. The cheap scenarios (noop, leaf) are run
---repeat-fast times (default 10), the expensive ones --repeat times (default 3).
+with `main`. Sub-second build times on a shared machine are bimodal (the same
+binary alternates between two modes ~20% apart), so scenarios whose first run
+takes under 2 s are run --repeat-fast times (default 10) and compared on their
+*minimum* with a 7% threshold; longer scenarios are run --repeat times (default
+3) and compared on their *median* with threshold max(3%, spread/median of either
+tool); `cold` runs once and uses 7%. Improved iff candidate < (1 - t) * main,
+regressed iff candidate > (1 + t) * main. Overall: `failure` if anything is
+incorrect or any scenario regressed; `success` if at least one primary scenario
+improved and nothing regressed; otherwise `neutral`. Tables and speedup lines
+always report medians.
 
 Typical use:
   python3 bench/harness/run.py                 # standard sweep: medium-*, lake+main+candidate, repeat 3
@@ -87,11 +90,10 @@ PRIMARY_SCENARIOS = ("noop", "leaf", "swarm", "hub")
 DEFAULT_TOOLS = "lake,main,candidate"
 ARTIFACT_EXTS = (".olean", ".ilean", ".c")
 BUILD_TIMEOUT_S = 1800
-NOISE_FLOOR = 0.03
-NOISE_FLOOR_FAST = 0.05   # scenarios whose main median is under FAST_SECONDS
+NOISE_FLOOR = 0.03        # median-based comparison of long scenarios
+NOISE_FLOOR_FAST = 0.07   # min-based comparison of scenarios under FAST_SECONDS
 FAST_SECONDS = 2.0
 COLD_THRESHOLD = 0.07
-FAST_SCENARIOS = ("noop", "leaf")
 SCRUB_PREFIXES = ("LAKE_", "LEAN_")
 SCRUB_EXACT = ("LEAN", "ELAN_TOOLCHAIN", "XDG_CACHE_HOME", "TMPDIR", "CC", "AR", "CURL")
 
@@ -565,66 +567,95 @@ def summarize(runs: list[dict]) -> dict:
     return out
 
 
-def bench_tool(tool_name: str, tool: dict, cfg_name: str, src: Path, corpus: dict, targets: dict,
-               scenarios: list[str], repeat: int, repeat_fast: int, use_scope: bool, mem_gb: int | None,
-               extra_env: dict) -> tuple[dict, dict]:
-    """Returns (per-scenario results, manifests keyed by step name)."""
-    d = WORK / "corpora" / cfg_name / tool_name
-    fresh_copy(src, d)
-    s = Session(tool_name, tool, d, use_scope, mem_gb, extra_env)
-    results: dict[str, dict] = {}
-    manifests: dict[str, dict] = {}
-    build_dir = d / ".lake" / "build"
+def bench_corpus(cfg_name: str, src: Path, corpus: dict, targets: dict, tools: dict, order: list[str],
+                 scenarios: list[str], repeat: int, repeat_fast: int, use_scope: bool, mem_gb: int | None,
+                 extra_env: dict) -> tuple[dict, dict]:
+    """Measure every tool on one corpus, interleaving the tools run by run.
+
+    Each tool gets its own copy of the corpus. Cold builds happen in `order`;
+    then, for every repetition of every scenario, the same edit is applied to
+    every copy and the tools are built one after another in a rotating order,
+    so that drift of the machine over time (thermal state, caches, background
+    load) affects all tools alike instead of whichever ran last.
+    Returns ({tool: per-scenario results}, {tool: {step: manifest}}).
+    """
+    sessions: dict[str, Session] = {}
+    for name in order:
+        d = WORK / "corpora" / cfg_name / name
+        fresh_copy(src, d)
+        sessions[name] = Session(name, tools[name], d, use_scope, mem_gb, extra_env)
+    results: dict[str, dict] = {name: {} for name in order}
+    manifests: dict[str, dict] = {name: {} for name in order}
+    failed: set[str] = set()
+
+    def record(name: str, step: str) -> None:
+        manifests[name][step] = artifact_manifest(sessions[name].dir / ".lake" / "build")
+
+    for name in order:
+        log(f"[{cfg_name}/{name}] cold build")
+        cold = sessions[name].build()
+        results[name]["cold"] = summarize([cold])
+        record(name, "cold")
+        if cold["exit_code"] != 0 or cold["stragglers"]:
+            log(f"[{cfg_name}/{name}] cold build FAILED (exit {cold['exit_code']}){' (timed out)' if cold['timed_out'] else ''}")
+            failed.add(name)
+            continue
+        log(f"[{cfg_name}/{name}] cold: {cold['wall_s']:.1f}s wall, {cold['cpu_user_s'] + cold['cpu_sys_s']:.1f}s cpu, "
+            f"peak mem {cold['peak_mem_mb'] or '?'} MB, {cold['jobs']} jobs")
+
     stamp = 0
-
-    def record(step: str, r: dict) -> None:
-        manifests[step] = artifact_manifest(build_dir)
-
-    log(f"[{cfg_name}/{tool_name}] cold build")
-    cold = s.build()
-    results["cold"] = summarize([cold])
-    record("cold", cold)
-    if cold["exit_code"] != 0:
-        log(f"[{cfg_name}/{tool_name}] cold build FAILED (exit {cold['exit_code']}){' (timed out)' if cold['timed_out'] else ''}")
-        return results, manifests
-    log(f"[{cfg_name}/{tool_name}] cold: {cold['wall_s']:.1f}s wall, {cold['cpu_user_s'] + cold['cpu_sys_s']:.1f}s cpu, "
-        f"peak mem {cold['peak_mem_mb'] or '?'} MB, {cold['jobs']} jobs")
     for scen in scenarios:
         if scen == "cold":
             continue
-        runs = []
-        for i in range(repeat_fast if scen in FAST_SCENARIOS else repeat):
-            if scen == "leaf":
-                stamp += 1
-                apply_edit(d, corpus, [targets["leaf"]], stamp)
-            elif scen == "hub":
-                stamp += 1
-                apply_edit(d, corpus, [targets["hub"]], stamp)
-            elif scen == "swarm":
-                stamp += 1
-                apply_edit(d, corpus, targets["swarm"], stamp)
-            r = s.build()
-            runs.append(r)
-            record(f"{scen}/{i}", r)
-            if r["exit_code"] != 0 or r["stragglers"]:
-                log(f"[{cfg_name}/{tool_name}] {scen} run {i + 1} FAILED (exit {r['exit_code']}, stragglers {r['stragglers']})")
-                break
-        results[scen] = summarize(runs)
-        if results[scen].get("median_wall_s") is not None:
-            log(f"[{cfg_name}/{tool_name}] {scen}: median {results[scen]['median_wall_s']:.2f}s "
-                f"(min {results[scen]['min_wall_s']:.2f}, max {results[scen]['max_wall_s']:.2f}, jobs {runs[0]['jobs']})")
+        runs: dict[str, list[dict]] = {name: [] for name in order}
+        n_runs = repeat
+        i = 0
+        while i < n_runs:
+            stamp += 1
+            edit = {"leaf": [targets["leaf"]], "hub": [targets["hub"]], "swarm": targets["swarm"]}.get(scen)
+            rotation = order[i % len(order):] + order[: i % len(order)]
+            for name in rotation:
+                if name in failed:
+                    continue
+                if edit:
+                    apply_edit(sessions[name].dir, corpus, edit, stamp)
+                r = sessions[name].build()
+                runs[name].append(r)
+                record(name, f"{scen}/{i}")
+                if r["exit_code"] != 0 or r["stragglers"]:
+                    log(f"[{cfg_name}/{name}] {scen} run {i + 1} FAILED (exit {r['exit_code']}, stragglers {r['stragglers']})")
+                    failed.add(name)
+            if i == 0:
+                first = [runs[n][0]["wall_s"] for n in order if runs[n]]
+                if first and max(first) < FAST_SECONDS:
+                    n_runs = max(repeat, repeat_fast)  # cheap scenario: take many samples
+            i += 1
+        for name in order:
+            results[name][scen] = summarize(runs[name])
+            res = results[name][scen]
+            if res.get("median_wall_s") is not None:
+                log(f"[{cfg_name}/{name}] {scen}: median {res['median_wall_s']:.2f}s "
+                    f"(min {res['min_wall_s']:.2f}, max {res['max_wall_s']:.2f}, n {len(runs[name])}, jobs {runs[name][0]['jobs']})")
+
     # breaking edit: every dependent of the hub must fail to build, then recover
-    original = apply_break(d, corpus, targets["hub"])
-    broken = s.build()
-    module_file(d, corpus, targets["hub"]).write_text(original, encoding="utf-8")
-    recovered = s.build()
-    record("recovered", recovered)
-    results["break"] = {"broken_exit_code": broken["exit_code"], "broken_failed_jobs": broken["failed_jobs"],
-                        "recovered_exit_code": recovered["exit_code"], "recovered_wall_s": recovered["wall_s"],
-                        "ok": broken["exit_code"] != 0 and recovered["exit_code"] == 0 and not (broken["stragglers"] or recovered["stragglers"])}
-    log(f"[{cfg_name}/{tool_name}] break: broken build exit {broken['exit_code']} ({broken['failed_jobs']} failed jobs), "
-        f"recovered exit {recovered['exit_code']}")
-    results["stragglers_total"] = s.stragglers
+    for name in order:
+        if name in failed:
+            results[name]["break"] = {"ok": False, "skipped": "earlier failure"}
+            results[name]["stragglers_total"] = sessions[name].stragglers
+            continue
+        s = sessions[name]
+        original = apply_break(s.dir, corpus, targets["hub"])
+        broken = s.build()
+        module_file(s.dir, corpus, targets["hub"]).write_text(original, encoding="utf-8")
+        recovered = s.build()
+        record(name, "recovered")
+        results[name]["break"] = {"broken_exit_code": broken["exit_code"], "broken_failed_jobs": broken["failed_jobs"],
+                                  "recovered_exit_code": recovered["exit_code"], "recovered_wall_s": recovered["wall_s"],
+                                  "ok": broken["exit_code"] != 0 and recovered["exit_code"] == 0
+                                  and not (broken["stragglers"] or recovered["stragglers"])}
+        log(f"[{cfg_name}/{name}] break: broken build exit {broken['exit_code']} ({broken['failed_jobs']} failed jobs), "
+            f"recovered exit {recovered['exit_code']}")
+        results[name]["stragglers_total"] = s.stragglers
     return results, manifests
 
 
@@ -683,15 +714,16 @@ def verdicts(measurements: dict, correctness: dict, tools: list[str]) -> dict:
             if m.get("median_wall_s") is None or c.get("median_wall_s") is None:
                 continue
             if scen == "cold":
-                t = COLD_THRESHOLD
+                t, stat = COLD_THRESHOLD, "median"
+            elif m["median_wall_s"] < FAST_SECONDS:
+                t, stat = NOISE_FLOOR_FAST, "min"
             else:
-                floor = NOISE_FLOOR_FAST if m["median_wall_s"] < FAST_SECONDS else NOISE_FLOOR
-                t = max(floor, (m["max_wall_s"] - m["min_wall_s"]) / m["median_wall_s"],
-                        (c["max_wall_s"] - c["min_wall_s"]) / c["median_wall_s"])
-            ratio = m["median_wall_s"] / c["median_wall_s"]
-            state = "improved" if c["median_wall_s"] < (1 - t) * m["median_wall_s"] else (
-                "regressed" if c["median_wall_s"] > (1 + t) * m["median_wall_s"] else "same")
-            out["per_scenario"][f"{cfg_name}/{scen}"] = {"main_s": m["median_wall_s"], "candidate_s": c["median_wall_s"],
+                t, stat = max(NOISE_FLOOR, (m["max_wall_s"] - m["min_wall_s"]) / m["median_wall_s"],
+                              (c["max_wall_s"] - c["min_wall_s"]) / c["median_wall_s"]), "median"
+            mv, cv = m[f"{stat}_wall_s"], c[f"{stat}_wall_s"]
+            ratio = mv / cv
+            state = "improved" if cv < (1 - t) * mv else ("regressed" if cv > (1 + t) * mv else "same")
+            out["per_scenario"][f"{cfg_name}/{scen}"] = {"statistic": stat, "main_s": mv, "candidate_s": cv,
                                                           "speedup": round(ratio, 4), "threshold": round(t, 4), "state": state}
             if state == "improved":
                 out["improved"].append(f"{cfg_name}/{scen}")
@@ -758,8 +790,8 @@ def print_report(result: dict) -> None:
                                          for k, v in c.items() if not (v["identical"] and v["builds_ok"] and v["break_ok"]))))
     v = result["verdict"]
     for key, s in v.get("per_scenario", {}).items():
-        print(f"verdict {key}: {s['state']} (main {s['main_s']:.2f}s, candidate {s['candidate_s']:.2f}s, "
-              f"speedup {s['speedup']:.3f}x, threshold {s['threshold'] * 100:.1f}%)")
+        print(f"verdict {key}: {s['state']} ({s['statistic']}: main {s['main_s']:.2f}s, candidate {s['candidate_s']:.2f}s, "
+              f"speedup {s['speedup']:.3f}x, threshold {s['threshold'] * 100:.0f}%)")
     print(f"verdict: {v['overall']}" + (f" ({'; '.join(v['reasons'])})" if v.get("reasons") else ""))
     print(f"standard run: {'yes' if result['standard'] else 'no (' + ', '.join(result['nonstandard_reasons']) + ')'}")
     print()
@@ -772,8 +804,8 @@ def main() -> None:
     ap.add_argument("--tools", default=DEFAULT_TOOLS, help="comma-separated: lake, main, candidate")
     ap.add_argument("--main-ref", default=None, help="git ref for `main` (default: merge-base of HEAD and origin/main)")
     ap.add_argument("--scenarios", default=",".join(ALL_SCENARIOS))
-    ap.add_argument("--repeat", type=int, default=3, help="runs per expensive incremental scenario (swarm, hub); median reported")
-    ap.add_argument("--repeat-fast", type=int, default=10, help="runs per cheap incremental scenario (noop, leaf)")
+    ap.add_argument("--repeat", type=int, default=3, help="runs per incremental scenario taking >= 2 s (compared on medians)")
+    ap.add_argument("--repeat-fast", type=int, default=10, help="runs per incremental scenario taking < 2 s (compared on minima)")
     ap.add_argument("--cpus", default=None, help="CPU list to pin to, e.g. 0-15 (default: bench/local.json or half)")
     ap.add_argument("--mem-gb", type=int, default=None, help="memory cap in GiB (default: bench/local.json or half)")
     ap.add_argument("--out", default=None, help="result JSON path (default: research/results/ for standard runs, else bench/work/results/)")
@@ -853,17 +885,14 @@ def main() -> None:
                                   "config_sha256": sha256_file(cfg_path)}
         log(f"corpus {cfg_name}: {corpus['stats']['modules']} modules, {corpus['stats']['lines']} lines, "
             f"hub {targets['hub']} ({targets['hub_transitive_dependents']} transitive dependents), swarm edits {len(targets['swarm'])}")
-        # rotate the tool order per corpus so no tool always runs last on a warm machine
+        # rotate the tool order per corpus (and per repetition inside bench_corpus)
         order = tool_order[idx % len(tool_order):] + tool_order[: idx % len(tool_order)]
         orders[cfg_name] = order
-        measurements[cfg_name] = {}
-        manifests_all[cfg_name] = {}
-        for tool_name in order:
-            res, manifests = bench_tool(tool_name, tools[tool_name], cfg_name, src, corpus, targets, scenarios,
-                                        args.repeat, args.repeat_fast, use_scope, caps["mem_gb"], extra_env)
-            measurements[cfg_name][tool_name] = res
-            manifests_all[cfg_name][tool_name] = manifests
-            if not args.keep:
+        measurements[cfg_name], manifests_all[cfg_name] = bench_corpus(
+            cfg_name, src, corpus, targets, tools, order, scenarios, args.repeat, args.repeat_fast,
+            use_scope, caps["mem_gb"], extra_env)
+        if not args.keep:
+            for tool_name in order:
                 shutil.rmtree(WORK / "corpora" / cfg_name / tool_name, ignore_errors=True)
                 shutil.rmtree(WORK / "corpora" / cfg_name / f".bench-{tool_name}", ignore_errors=True)
     for alias, t in tools.items():

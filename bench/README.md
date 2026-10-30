@@ -42,10 +42,12 @@ gigantic Lean project, without doing anything Lake would not do?* See
 | `break` | rename the hub's `val_ge`, build (must fail), restore, build | untimed; every dependent must still be rebuilt when it must |
 
 Edits accumulate (each one is a new theorem with a fresh name), so the tools see the
-same sequence of edits and no restore step is needed. The cheap scenarios (`noop`,
-`leaf`) are run `--repeat-fast` times (default 10) and the expensive ones
-(`swarm`, `hub`) `--repeat` times (default 3); medians are reported. Tools are measured in a
-rotated order per corpus so no tool always runs last on a warm machine.
+same sequence of edits and no restore step is needed. A scenario whose first run
+takes under 2 s is run `--repeat-fast` times (default 10), a longer one `--repeat`
+times (default 3); tables report medians. The tools are **interleaved**: every
+repetition applies the same edit to every tool's copy and builds them one after
+another in a rotating order, so drift of the machine over time (thermal state,
+caches, background load) affects all tools alike instead of whichever ran last.
 
 ## Caps and comparability
 
@@ -85,12 +87,15 @@ an enforced CPU cap. Standard runs
 are written to `research/results/` and are the only ones the leaderboard counts;
 everything else goes to `bench/work/results/` (or `--out`).
 
-The verdict compares the candidate's median with `main`'s per corpus and scenario
-with the threshold `t = max(floor, main's spread / median, candidate's spread /
-median)` (spread = max − min; floor 5% under 2 s, 3% otherwise, 7% for `cold`):
-improved below `(1 − t)`, regressed above `(1 + t)`. Two builds of identical
-source measured against each other on this harness stay within these thresholds;
-that is what they were calibrated on. Overall: `failure` if any correctness
+The verdict compares the candidate with `main` per corpus and scenario. Scenarios
+under 2 s are compared on the **minimum** of their 10 runs with a 7% threshold:
+on a shared machine their timings are bimodal (the same binary alternates between
+two modes ~20% apart), which defeats medians and spreads but not minima. Longer
+scenarios are compared on **medians** with `t = max(3%, either tool's
+(max − min) / median)`; `cold`, which runs once, uses 7%. Improved below
+`(1 − t) × main`, regressed above `(1 + t) × main`. Two builds of identical source
+measured against each other stay within these thresholds; that is what they were
+calibrated on (see `research/log/2026-10-29-baseline.md`). Overall: `failure` if any correctness
 check failed or anything regressed; `success` if a primary scenario improved and
 nothing regressed; otherwise `neutral`. The harness exits with status 2 on
 `failure`.
