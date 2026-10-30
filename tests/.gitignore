@@ -1,2 +1,4 @@
 *produced.*
 work/
+# Modified for Blake (2026-10-29): logs of tests/run_all.sh
+.out*/

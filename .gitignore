@@ -8,3 +8,7 @@ lake-manifest.json
 result
 result-*
 .direnv/
+
+# Benchmark harness scratch space and per-machine caps
+bench/work/
+bench/local.json
