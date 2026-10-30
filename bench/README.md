@@ -24,8 +24,8 @@ gigantic Lean project, without doing anything Lake would not do?* See
   the verdict, and writes one JSON result.
 - `harness/scope_stats.sh`: runs each build inside its systemd scope and records
   the scope's peak memory and CPU time, so helper processes are accounted for.
-- `harness/leaderboard.py`: renders `../research/results/LEADERBOARD.md` (run by
-  the maintainer after merges).
+- `harness/leaderboard.py`: renders `../research/results/LEADERBOARD.md` (the
+  Leaderboard workflow runs it after every merge that adds results).
 - `local.json` (gitignored): your machine's caps, e.g. `{"cpus": "0-15", "mem_gb": 32}`.
 - `work/` (gitignored): generated corpora, per-tool copies, per-tool caches, the
   `main` worktree, and results of non-standard runs.
@@ -56,9 +56,10 @@ and sets `LEAN_NUM_THREADS` to the number of CPUs, which is what bounds Lake 5's
 concurrency (it has no jobs flag). `--mem-gb` is enforced with a transient
 `systemd-run --user --scope` when available; the same scope accounts for the whole
 process tree and is stopped after each build, so stragglers are counted and
-killed. Where a cap cannot be enforced the harness says so loudly and marks the run
-non-standard. All of this goes into the result file along with a machine
-fingerprint. Only the ratios between tools measured in the same run are comparable
+killed. Where a cap cannot be enforced the harness says so loudly; an
+unenforced CPU cap makes the run non-standard, an unenforced memory cap is
+recorded in the result. All of this goes into the result file along with a
+machine fingerprint. Only the ratios between tools measured in the same run are comparable
 across machines.
 
 The environment is scrubbed: every `LAKE_*`, `LEAN_*` (except the `LEAN_CC` the
@@ -82,8 +83,8 @@ correct, which is deliberate: that is a real optimization.
 ## Standard runs and the verdict
 
 A run is **standard** when it uses the default corpora, tools, and scenarios,
-`--repeat` of at least 3 and `--repeat-fast` of at least 10, a clean git tree, and
-an enforced CPU cap. Standard runs
+`--repeat` of at least 3 and `--repeat-fast` of at least 10, no `--main-ref`, a
+clean git tree (changes under `research/` are ignored), and an enforced CPU cap. Standard runs
 are written to `research/results/` and are the only ones the leaderboard counts;
 everything else goes to `bench/work/results/` (or `--out`).
 
@@ -92,9 +93,10 @@ The verdict compares the candidate with `main` per corpus and scenario on
 and repetition *i* of `main` ran within seconds of each other, so their ratio
 cancels the machine's drift between speed states (the same binary alternates
 between modes ~20% apart over seconds, which defeats medians, spreads, and
-minima alike). The speedup is the median of those ratios; scenarios under 2 s get
-10 repetitions and a 7% threshold, longer ones 3 repetitions and 3%, `cold` (one
-run) 7%. Improved at `≥ 1 + t`, regressed at `≤ 1 − t`. Two builds of identical
+minima alike). The speedup is the median of those ratios. A scenario counts as
+fast when every tool's first run took under 2 s; fast scenarios get 10
+repetitions and a 7% threshold, others 3 repetitions and 3%, `cold` (one run) 7%.
+The fast/slow decision is stored in the result and reused by `--rescore`. Improved at `≥ 1 + t`, regressed at `≤ 1 − t`. Two builds of identical
 source stayed within 5.5% under this statistic on the reference machine; see
 `research/log/2026-10-29-baseline.md`. `--rescore FILE` recomputes a stored
 result's verdict under the current rule and records that it did. Overall: `failure` if any correctness

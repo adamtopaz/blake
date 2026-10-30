@@ -66,14 +66,15 @@ macOS the harness still runs but its results are marked non-standard; install
 everything is available but optional.
 
 ```sh
-gh repo fork adamtopaz/blake --clone --remote-name fork   # origin = upstream, fork = yours
-cd blake
-lake build                                                # Blake -> .lake/build/bin/lake (~1 min)
+git clone https://github.com/adamtopaz/blake && cd blake
+gh repo fork --remote --remote-name fork      # origin stays upstream; `fork` is yours
+lake build                                     # Blake -> .lake/build/bin/lake (~1 min)
 .lake/build/bin/lake --version
 ```
 
-If you already have a clone, keep `origin` pointing at `adamtopaz/blake` and add
-your fork as `fork`; the harness compares against `origin/main`.
+Keep `origin` pointing at `adamtopaz/blake`: the harness and the hygiene check
+compare against `origin/main`. If you already have a clone with `origin` set to
+your fork, rename it (`git remote rename origin fork`) and add upstream as `origin`.
 
 On NixOS, nixpkgs' `elan` wraps the toolchain's `lake` to export `LEAN_CC`; the
 harness and `tests/run_all.sh` do the same for Blake automatically. If you run
@@ -95,7 +96,7 @@ tests/run_all.sh -o .out-main                        # Lake's test suite on main
 python3 bench/harness/run.py --quick --tools lake,candidate   # harness smoke test (~3 min)
 ```
 
-The last command must end with `correctness of candidate: identical artifacts to
+The last command must print `correctness of candidate: identical artifacts to
 lake, all builds ok, break check ok`. Quick runs are not standard runs; they are
 written to `bench/work/results/`, not to `research/results/`.
 
@@ -125,6 +126,8 @@ medium corpora. Prefer measurement-driven ideas over architectural rewrites.
 Before writing code:
 
 1. Update and branch: `git fetch origin && git switch -c research/<slug> origin/main`.
+   If `origin/main` moves while you work, merge it into your branch; do not rebase
+   (results name the commit they measured, and a rebase orphans it).
 2. Create your log entry from the template:
    `cp research/log/TEMPLATE.md research/log/$(date +%F)-<slug>.md` and fill in the
    hypothesis, why you believe it, and how you will measure it. The entry exists so
@@ -140,7 +143,8 @@ Before writing code:
 - If the implementation is not working after 60 minutes, stop, record what you
   learned, and go to step 7 with outcome `inconclusive`.
 - **Commit before you measure.** Results record the commit they measured;
-  measuring uncommitted code makes a result nobody can reproduce.
+  measuring uncommitted code makes a result nobody can reproduce. (Edits under
+  `research/`, such as your log entry, do not count as uncommitted here.)
 
 ## 5. Verify correctness (about 10 minutes)
 
@@ -154,14 +158,17 @@ python3 bench/harness/run.py --quick --tools lake,candidate   # artifacts identi
 
 If the harness prints `INCORRECT`, your change is wrong, not clever.
 
-## 6. Measure (at most 30 minutes)
+## 6. Measure (about 30 minutes on 16 cores; longer on fewer)
 
 Run the standard sweep. It measures stock Lake, Blake `main` (the merge-base of
 your branch and `origin/main`), and your candidate on the same corpora, in the same
-session, under the same caps, and decides for you:
+session, under the same caps, and decides for you. It takes about 30 minutes on 16
+CPUs and scales with the CPU budget, which is longer than most agent shell tools
+allow, so run it detached and poll the log:
 
 ```sh
-python3 bench/harness/run.py --label <slug>
+nohup python3 bench/harness/run.py --label <slug> > bench/work/sweep.log 2>&1 &
+tail -f bench/work/sweep.log        # or check it periodically; it ends with `wrote ...`
 ```
 
 It prints a table, `speedup ... vs main` and `vs lake` lines, one `verdict` line per
@@ -180,15 +187,19 @@ corpus and scenario, and a final `verdict: success|neutral|failure` line, and wr
   passing. **failure**: anything regressed or any check failed. Otherwise
   **neutral**.
 
-If a result looks like noise, rerun with `--repeat 5 --repeat-fast 20`. **Commit every result file
-the standard sweep writes**, including reruns and the ones you do not like. Never
+If a result looks like noise, rerun with `--repeat 5 --repeat-fast 20`. **Commit
+every result file the standard sweep writes**, including reruns and the ones you
+do not like: the hygiene check reads the newest result measured on the PR's code
+and refuses a `research:` PR that also carries a `failure` on that code. Never
 tune the benchmark, corpora, or caps to make a result look better.
 
 ## 7. Record (about 10 minutes)
 
-Finish your log entry: the outcome (`success`, `failure`, or `inconclusive`), the
-harness's speedup and verdict lines verbatim, the result file names, and what the
-next person should know.
+Finish your log entry: the outcome, the harness's speedup and verdict lines
+verbatim, the result file names, and what the next person should know. The
+outcome follows the harness: verdict `success` is outcome `success`; verdict
+`neutral` or `failure` is outcome `failure`; an implementation you could not
+finish or measure is `inconclusive`.
 
 If the outcome is `success`, also write `research/ideas/<slug>.md` from
 `research/ideas/TEMPLATE.md`: the problem, the mechanism, where it lives in the
@@ -199,18 +210,22 @@ Commit on your branch:
 - `success`: the code, the log entry, the result JSON(s), and the idea write-up.
   Commit messages and the PR title start with `research:`.
 - `failure` or `inconclusive`: **only** the log entry and result JSON(s), prefixed
-  `log:`. Do not include the code in the PR; describe the approach in the log and,
-  if the code is worth keeping, push it to a separate `research/<slug>-wip` branch
-  on your fork and link it from the log.
+  `log:`, on a branch without the code. The simplest way: push your code branch to
+  your fork as `research/<slug>-wip` (link it from the log), then
+  `git switch -c research/<slug>-log origin/main`, copy in the log entry and
+  result files, and commit those.
 
-Do not regenerate or commit `research/results/LEADERBOARD.md`; the maintainer does
-that after merging (it would conflict between concurrent PRs). You may run
-`python3 bench/harness/leaderboard.py` locally to look at it.
+Do not commit `research/results/LEADERBOARD.md`; a workflow regenerates it after
+every merge (committing it would conflict between concurrent PRs). To look at it
+locally: `python3 bench/harness/leaderboard.py --out bench/work/LEADERBOARD.md`.
 
 ## 8. Submit
 
 Open a PR against `adamtopaz/blake` `main` even for failures: negative results are
-part of the product.
+part of the product. The title prefix tells the hygiene check which rules apply:
+`research:` for a success (code + log + idea + results), `log:` for a failure or
+inconclusive result (log + results, no code); maintainers also use `bench:`,
+`ci:`, `fix:`, `docs:`, `chore:`, `toolchain:`.
 
 ```sh
 git push -u fork research/<slug>
@@ -218,9 +233,8 @@ gh pr create --repo adamtopaz/blake --base main --head <your-github-user>:resear
   --title "research: <one line>" --body-file research/log/<your-entry>.md
 ```
 
-(Use `log:` instead of `research:` in the title for failures and inconclusive
-results. Maintainers with push access may push the branch to `origin` instead.) If
-`gh` is unavailable, push the branch and print the compare URL
+(Maintainers with push access may push the branch to `origin` instead.) If `gh` is
+unavailable, push the branch and print the compare URL
 `https://github.com/adamtopaz/blake/compare/main...<your-github-user>:research/<slug>`
 so a human can open the PR.
 
@@ -230,14 +244,14 @@ Before pushing, run the same hygiene check CI will run:
 python3 .github/scripts/pr_check.py --base origin/main --title "research: <one line>"
 ```
 
-CI (`.github/workflows/pr-check.yml`) then builds Blake, runs Lake's test suite
-against the base branch's results, checks artifact identity and the breaking-edit
-rule against stock Lake on the small corpora, and runs the hygiene check. It never
-measures performance; your result file is the measurement. Fix red checks before
-asking for review. The maintainer reviews and merges; log-only PRs are merged
-quickly. If `main` moves before your PR is merged, the maintainer may ask you to
-rebase and re-measure. After a merge, a workflow regenerates
-`research/results/LEADERBOARD.md`.
+CI (`.github/workflows/`) then builds Blake, runs Lake's test suite against the
+base branch's results, checks artifact identity and the breaking-edit rule against
+stock Lake on the small corpora, and runs the hygiene check. It never measures
+performance; your result file is the measurement. Fix red checks before asking for
+review. The maintainer reviews and merges (merge commits only, so every measured
+commit stays reachable); log-only PRs are merged quickly. If `main` moves before
+your PR is merged, the maintainer may ask you to merge it in and re-measure. After
+a merge, a workflow regenerates `research/results/LEADERBOARD.md`.
 
 ## Hard rules, in one place
 

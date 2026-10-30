@@ -1,10 +1,18 @@
-# Correctness and hygiene checks for pull requests. This workflow never measures
-# performance: hosted runners are shared and noisy, and the research loop's
-# verdict comes from the contributor's own machine (see instructions.md §6).
+# Correctness checks. This workflow never measures performance: hosted runners
+# are shared and noisy, and the research loop's verdict comes from the
+# contributor's own machine (see instructions.md §6).
+#
+# On a pull request: build Blake, run Lake's test suite and compare it with the
+# base branch's results (no test that passes on the base may fail), and check
+# artifact identity and the breaking-edit rule against stock Lake on the small
+# corpora. On a push to main: run the suite once and cache its results under
+# the commit, so pull requests against that commit need not repeat it.
 name: PR check
 
 on:
   pull_request:
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -14,28 +22,13 @@ concurrency:
   group: pr-check-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  BASE_REF: ${{ github.base_ref || 'main' }}
-
 jobs:
-  hygiene:
-    name: PR hygiene
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: Check the PR against the research-loop rules
-        env:
-          PR_TITLE: ${{ github.event.pull_request.title }}
-        run: python3 .github/scripts/pr_check.py --base "origin/$BASE_REF" --title "$PR_TITLE"
-
   build-test-correctness:
     name: Build, Lake test suite, artifact identity
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    env:
+      BASE_REF: ${{ github.base_ref || 'main' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -67,28 +60,46 @@ jobs:
           lake build
           .lake/build/bin/lake --version
 
+      # ---- base branch results (pull requests) -------------------------------
       - name: Resolve the base commit
         id: base
         run: echo "sha=$(git rev-parse "origin/$BASE_REF")" >> "$GITHUB_OUTPUT"
 
-      - name: Restore the base branch's test results
+      - name: Restore the base commit's test results
+        if: github.event_name == 'pull_request'
         id: base-tests
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: tests/.out-main
-          key: tests-base-${{ runner.os }}-${{ hashFiles('lean-toolchain') }}-${{ steps.base.outputs.sha }}
+          key: tests-${{ runner.os }}-${{ hashFiles('lean-toolchain') }}-${{ steps.base.outputs.sha }}
 
-      - name: Run the test suite on the base branch (cache miss only)
-        if: steps.base-tests.outputs.cache-hit != 'true'
+      - name: Run the test suite on the base commit (cache miss only)
+        if: github.event_name == 'pull_request' && steps.base-tests.outputs.cache-hit != 'true'
         run: |
+          set +e
           git worktree add --detach "$RUNNER_TEMP/blake-base" "${{ steps.base.outputs.sha }}"
           cd "$RUNNER_TEMP/blake-base"
-          lake build
-          tests/run_all.sh -j 4 -o "$GITHUB_WORKSPACE/tests/.out-main" || true
+          lake build && tests/run_all.sh -j 4 -o "$GITHUB_WORKSPACE/tests/.out-main"
+          echo "base suite exit status $? (informational)"
+          test -s "$GITHUB_WORKSPACE/tests/.out-main/results.txt" || { echo "no base results produced"; exit 1; }
 
       - name: Run the test suite (no test that passes on the base may fail)
+        if: github.event_name == 'pull_request'
         run: tests/run_all.sh -j 4 --compare "$GITHUB_WORKSPACE/tests/.out-main"
 
+      # ---- main: produce and cache the results for future pull requests ------
+      - name: Run the test suite on main
+        if: github.event_name != 'pull_request'
+        run: tests/run_all.sh -j 4 -o "$GITHUB_WORKSPACE/tests/.out-main"
+
+      - name: Save main's test results
+        if: github.event_name != 'pull_request' && always()
+        uses: actions/cache/save@v4
+        with:
+          path: tests/.out-main
+          key: tests-${{ runner.os }}-${{ hashFiles('lean-toolchain') }}-${{ github.sha }}
+
+      # ---- correctness against stock Lake ------------------------------------
       - name: Artifacts identical to stock Lake, breaking edits fail alike
         run: |
           python3 bench/harness/run.py --quick --tools lake,candidate \
@@ -98,7 +109,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: logs
+          name: logs-${{ github.run_id }}
           path: |
             tests/.out
             tests/.out-main

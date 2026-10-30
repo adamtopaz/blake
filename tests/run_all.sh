@@ -5,8 +5,8 @@
 #   -j N           parallel tests (default 8)
 #   -o DIR         where to put per-test logs and results.txt (default tests/.out)
 #   --all          include the slow/network tests (bootstrap, toolchain, online)
-#   --compare DIR  also report tests that pass in DIR/results.txt (an earlier run,
-#                  e.g. of main) but fail now; exit non-zero if there are any
+#   --compare DIR  judge against DIR/results.txt (an earlier run, e.g. of main):
+#                  exit non-zero only for failures that did not already fail there
 #   TEST_DIR       specific tests, e.g. tests/init examples/hello (default: every test)
 #
 # Uses the Blake binary built at the repository root unless LAKE is set, exactly
@@ -26,7 +26,11 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-export LAKE=${LAKE:-$(lake -d .. query lake)}
+if [ -z "${LAKE:-}" ]; then
+  LAKE=$(lake -d .. query lake) || { echo "could not build or locate Blake's lake"; exit 1; }
+fi
+export LAKE
+TEST_TIMEOUT=${TEST_TIMEOUT:-900}
 # On NixOS, nixpkgs' elan wraps the toolchain's lake to export LEAN_CC; a
 # source-built lake needs the same for the executables it links to run.
 if [ -z "${LEAN_CC:-}" ] && [ -x "$(lean --print-prefix)/bin/cc" ]; then
@@ -46,11 +50,12 @@ export OUT
 : > "$OUT/results.txt"
 run_one() {
   d=$1; name=$(echo "$d" | tr '/' '_'); start=$(date +%s)
-  if ./run_test.sh "$d" > "$OUT/$name.log" 2>&1; then r=PASS; else r=FAIL; fi
+  if timeout "$TEST_TIMEOUT" ./run_test.sh "$d" > "$OUT/$name.log" 2>&1; then r=PASS; else r=FAIL; fi
   echo "$r $d $(( $(date +%s) - start ))s" >> "$OUT/results.txt"
   echo "$r $d"
 }
 export -f run_one
+export TEST_TIMEOUT
 printf '%s\n' "${TESTS[@]}" | xargs -P "$JOBS" -I{} bash -c 'run_one "$1"' _ {}
 
 pass=$(grep -c '^PASS' "$OUT/results.txt" || true)
@@ -63,18 +68,19 @@ if [ "$fail" -gt 0 ]; then
   rc=1
 fi
 if [ -n "$COMPARE" ]; then
-  if [ ! -f "$COMPARE/results.txt" ]; then
-    echo "no baseline results at $COMPARE/results.txt; judging on failures alone"
+  if [ ! -f "$COMPARE/results.txt" ] || ! grep -q '^PASS' "$COMPARE/results.txt"; then
+    echo "no usable baseline at $COMPARE/results.txt (missing or nothing passed); judging on failures alone"
   else
-    # With a baseline, only tests that passed there and fail now count.
-    newly=$(comm -12 <(grep '^PASS' "$COMPARE/results.txt" | awk '{print $2}' | sort) \
+    # With a baseline, a failure counts unless the same test already failed there
+    # (so new tests, and tests the baseline never ran, must pass).
+    newly=$(comm -13 <(grep '^FAIL' "$COMPARE/results.txt" | awk '{print $2}' | sort) \
                      <(grep '^FAIL' "$OUT/results.txt" | awk '{print $2}' | sort) || true)
     if [ -n "$newly" ]; then
-      echo "NEWLY FAILING compared to $COMPARE:"
+      echo "FAILING and not already failing in $COMPARE:"
       echo "$newly"
       rc=1
     else
-      echo "no test that passed in $COMPARE fails now"
+      echo "every failure (if any) already failed in $COMPARE"
       rc=0
     fi
   fi
