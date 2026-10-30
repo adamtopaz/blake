@@ -79,8 +79,22 @@ def LeanLib.recBuildLean
   (self : LeanLib) : FetchM (Job Unit)
 := do
   let mods ← (← self.modules.fetch).await
+  -- Modified for Blake (2026-10-30): jobs run roughly in the order they are
+  -- created, so an edited module's trace check (and then its `lean` run) used to
+  -- wait behind the checks of the modules before it. Create the jobs of modules
+  -- whose source is newer than their trace first. Fetches are memoized, so the
+  -- fold below returns the same jobs and mixes them in the original order.
+  for mod in mods do
+    if (← sourceNewerThanTrace mod) then
+      discard <| mod.leanArts.fetch
   mods.foldlM (init := Job.nil) fun job mod => do
     return job.mix <| ← mod.leanArts.fetch
+where
+  /-- Whether `mod`'s source was modified after its trace was written. -/
+  sourceNewerThanTrace (mod : Module) : BaseIO Bool := do
+    let .ok trace ← mod.traceFile.metadata.toBaseIO | return false
+    let .ok src ← mod.leanFile.metadata.toBaseIO | return false
+    return compare src.modified trace.modified == .gt
 
 /-- The `LibraryFacetConfig` for the builtin `leanArtsFacet`. -/
 public def LeanLib.leanArtsFacetConfig : LibraryFacetConfig leanArtsFacet :=
