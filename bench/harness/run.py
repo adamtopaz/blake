@@ -912,6 +912,8 @@ def main() -> None:
     tool_names = [t for t in args.tools.split(",") if t]
     # The tree's state when the candidate is built is what the result describes.
     dirty = tree_dirty()
+    head_commit = git("rev-parse", "HEAD")
+    head_branch = git("rev-parse", "--abbrev-ref", "HEAD")
     tools, toolchain = resolve_tools(tool_names, env, args.main_ref)
     tool_order = [t for t in tool_names if "alias" not in tools[t]]
 
@@ -979,8 +981,7 @@ def main() -> None:
         "toolchain": {"pin": (ROOT / "lean-toolchain").read_text(encoding="utf-8").strip(), **toolchain},
         "harness": {"run_py_sha256": sha256_file(Path(__file__)), "generate_py_sha256": sha256_file(GEN),
                     "scrubbed_env": scrubbed, "build_timeout_s": BUILD_TIMEOUT_S},
-        "git": {"commit": git("rev-parse", "HEAD"), "branch": git("rev-parse", "--abbrev-ref", "HEAD"), "dirty": dirty,
-                "dirty_ignores": "research/"},
+        "git": {"commit": head_commit, "branch": head_branch, "dirty": dirty, "dirty_ignores": "research/"},
         "tools": {k: {kk: vv for kk, vv in v.items() if kk != "env"} for k, v in tools.items()},
         "tool_order": tool_names,
         "tool_order_per_corpus": orders,
