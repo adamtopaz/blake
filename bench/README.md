@@ -2,7 +2,8 @@
 
 Everything here exists to answer one question reproducibly: *is this version of
 Blake faster than the last one, and than stock Lake, on builds that look like a
-gigantic Lean project?* See `../instructions.md` for how the research loop uses it.
+gigantic Lean project, without doing anything Lake would not do?* See
+`../instructions.md` for how the research loop uses it.
 
 ## Pieces
 
@@ -14,14 +15,20 @@ gigantic Lean project?* See `../instructions.md` for how the research loop uses 
   - `deep`: a handful of long chains with occasional cross links; long critical path.
   - `wide`: a small core of hub modules imported by nearly everything, then a wide
     shallow fan; editing a hub rebuilds almost the whole corpus.
-  - sizes: `small` (200 modules, smoke tests), `medium` (1500 modules, the default
-    sweep), `large` (8000 modules, for scaling questions; slow).
-- `harness/run.py`: the measurement. Builds stock Lake, Blake `main` (from a git
-  worktree of `origin/main`), and the candidate (this checkout), copies the corpus
-  once per tool, then runs the scenarios below and writes one JSON result.
-- `harness/leaderboard.py`: renders `../research/results/LEADERBOARD.md`.
+  - sizes: `small` (200 modules, smoke tests), `medium` (1000 modules, the
+    standard sweep), `large` (8000 modules, for scaling questions; slow).
+- `harness/run.py`: the measurement. Resolves stock Lake from the pinned toolchain
+  (`$(lean --print-prefix)/bin/lake`), builds Blake `main` (a git worktree of the
+  merge-base of `HEAD` and `origin/main`) and the candidate (this checkout), copies
+  the corpus once per tool, runs the scenarios below, checks correctness, decides
+  the verdict, and writes one JSON result.
+- `harness/scope_stats.sh`: runs each build inside its systemd scope and records
+  the scope's peak memory and CPU time, so helper processes are accounted for.
+- `harness/leaderboard.py`: renders `../research/results/LEADERBOARD.md` (run by
+  the maintainer after merges).
 - `local.json` (gitignored): your machine's caps, e.g. `{"cpus": "0-15", "mem_gb": 32}`.
-- `work/` (gitignored): generated corpora, per-tool copies, and the `main` worktree.
+- `work/` (gitignored): generated corpora, per-tool copies, per-tool caches, the
+  `main` worktree, and results of non-standard runs.
 
 ## Scenarios
 
@@ -32,26 +39,56 @@ gigantic Lean project?* See `../instructions.md` for how the research loop uses 
 | `leaf` | append a theorem to a module nobody imports, build | minimal end-to-end latency of one edit |
 | `swarm` | append a theorem to up to 24 little-imported modules spread over the DAG, build | what a swarm of agents produces between builds |
 | `hub` | append a theorem to the most widely imported module, build | a large downstream rebuild: scheduling and parallelism |
+| `break` | rename the hub's `val_ge`, build (must fail), restore, build | untimed; every dependent must still be rebuilt when it must |
 
 Edits accumulate (each one is a new theorem with a fresh name), so the tools see the
 same sequence of edits and no restore step is needed. Incremental scenarios are run
-`--repeat` times (default 3) and the median is reported.
+`--repeat` times (default 3) and the median is reported. Tools are measured in a
+rotated order per corpus so no tool always runs last on a warm machine.
 
 ## Caps and comparability
 
-The harness pins itself and all children to `--cpus` (CPU affinity on Linux) and
-sets `LEAN_NUM_THREADS` to the number of CPUs, which is what bounds Lake 5's
+The harness pins itself and all children to `--cpus` (CPU affinity; Linux only)
+and sets `LEAN_NUM_THREADS` to the number of CPUs, which is what bounds Lake 5's
 concurrency (it has no jobs flag). `--mem-gb` is enforced with a transient
-`systemd-run --user --scope` when available, otherwise recorded as unenforced. All
-of this goes into the result file along with a machine fingerprint. Only the ratios
-between tools measured in the same run are comparable across machines.
+`systemd-run --user --scope` when available; the same scope accounts for the whole
+process tree and is stopped after each build, so stragglers are counted and
+killed. Where a cap cannot be enforced the harness says so loudly and marks the run
+non-standard. All of this goes into the result file along with a machine
+fingerprint. Only the ratios between tools measured in the same run are comparable
+across machines.
+
+The environment is scrubbed: every `LAKE_*`, `LEAN_*` (except the `LEAN_CC` the
+harness sets itself), `ELAN_TOOLCHAIN`, `XDG_CACHE_HOME`, `TMPDIR`, `CC`, `AR`, and
+`CURL` variable is dropped, and each tool gets private, empty `LAKE_CACHE_DIR`,
+`LAKE_CONFIG`, `XDG_CACHE_HOME`, and `TMPDIR` directories, so no state survives
+between tools or runs. A cache that persists across runs would therefore have to
+be an explicit, separately benchmarked feature.
 
 ## Correctness
 
-After each tool's cold build the harness hashes every `.olean`, `.ilean`, and `.c`
-under `.lake/build` and compares them with stock Lake's. Any difference marks the
-candidate incorrect. (`.trace`, `.hash`, and `.setup.json` files are expected to
-differ; they contain absolute paths and tool-specific data.)
+After **every** build the harness hashes each `.olean`, `.ilean`, and `.c` under
+`.lake/build` and compares them with stock Lake's at the same step; it also
+requires every build to succeed, no processes to be left behind, and the
+breaking-edit build to fail with the same number of failed jobs as Lake's. Any
+difference marks the candidate incorrect. (`.trace`, `.hash`, and `.setup.json`
+files are expected to differ; they contain absolute paths and tool-specific data.)
+A candidate that skips a rebuild whose output would have been identical is
+correct, which is deliberate: that is a real optimization.
+
+## Standard runs and the verdict
+
+A run is **standard** when it uses the default corpora, tools, and scenarios,
+`--repeat` of at least 3, a clean git tree, and an enforced CPU cap. Standard runs
+are written to `research/results/` and are the only ones the leaderboard counts;
+everything else goes to `bench/work/results/` (or `--out`).
+
+The verdict compares the candidate with `main` per corpus and scenario with the
+threshold `t = max(3%, main's (max − min) / median)` (`5%` for `cold`): improved
+below `(1 − t)`, regressed above `(1 + t)`. Overall: `failure` if any correctness
+check failed or anything regressed; `success` if a primary scenario improved and
+nothing regressed; otherwise `neutral`. The harness exits with status 2 on
+`failure`.
 
 ## Running pieces by hand
 

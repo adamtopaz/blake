@@ -41,40 +41,63 @@ caches, critical-path scheduling, cheaper traces, and so on.
 - **Drop-in compatibility.** Existing lakefiles (`lakefile.lean` and
   `lakefile.toml`), the `lake` command line, `lake serve` for editors, the manifest
   format, and the build directory layout must keep working. Lake's test suite
-  (`tests/`) must stay green.
+  (`tests/`) must stay as green as it is on `main`.
 - **Artifacts.** For the same inputs, Blake must produce `.olean`, `.ilean`, and
-  `.c` files **byte-identical** to stock Lake's. The harness checks this and a
-  candidate that fails is not an improvement, however fast.
+  `.c` files **byte-identical** to stock Lake's, after cold *and* incremental
+  builds, and it must fail exactly where Lake fails. The harness checks all of
+  this; a candidate that fails any check is not an improvement, however fast.
+- **Honesty of the measurement.** Blake may not behave differently because it is
+  being benchmarked: no code may depend on the corpus's names (`Corpus.*`,
+  `bench_edit_*`), its paths, the harness's environment variables, or its edit
+  pattern. No machine-specific build flags (such as `-march=native`). Parallelism
+  must respect the harness's caps (`LEAN_NUM_THREADS` and the CPU set). Any helper
+  process Blake starts must be started by the measured command and must not
+  outlive it; the harness kills and reports stragglers. Merged changes are
+  re-checked by the maintainer on held-out corpora.
 
-## 1. Set up (about 5 minutes)
+## 1. Set up (about 15 minutes)
 
 Prerequisites: `git`, [`elan`](https://github.com/leanprover/elan) (it installs the
-pinned toolchain automatically), Python 3.10+, and the `gh` CLI if you want the PR
-opened for you. A `nix develop` shell with everything is available but optional.
+pinned toolchain automatically), Python 3.10+, bash, and the `gh` CLI for the PR.
+Linux is the reference platform: CPU and memory caps are enforced only on Linux
+(CPU affinity, and `systemd-run --user` for memory and process accounting). On
+macOS the harness still runs but its results are marked non-standard; install
+`coreutils` from Homebrew for the test suite (`gtail`). A `nix develop` shell with
+everything is available but optional.
 
 ```sh
-git clone https://github.com/adamtopaz/blake && cd blake
-lake build                           # builds Blake into .lake/build/bin/lake (about 1 minute)
+gh repo fork adamtopaz/blake --clone --remote-name fork   # origin = upstream, fork = yours
+cd blake
+lake build                                                # Blake -> .lake/build/bin/lake (~1 min)
 .lake/build/bin/lake --version
 ```
 
-On NixOS, nixpkgs' `elan` wraps the toolchain's `lake` to export `LEAN_CC`; the
-harness does the same for Blake automatically. If you run Blake by hand, first
-`export LEAN_CC="$(lean --print-prefix)/bin/cc"`.
+If you already have a clone, keep `origin` pointing at `adamtopaz/blake` and add
+your fork as `fork`; the harness compares against `origin/main`.
 
-**Resource caps.** Benchmarks must not take over the machine. The harness pins
-itself to a CPU set and a memory cap and records them in the result. Defaults are
-half of the machine; set yours once in `bench/local.json` (gitignored):
+On NixOS, nixpkgs' `elan` wraps the toolchain's `lake` to export `LEAN_CC`; the
+harness and `tests/run_all.sh` do the same for Blake automatically. If you run
+Blake by hand, first `export LEAN_CC="$(lean --print-prefix)/bin/cc"`.
+
+**Resource caps.** Benchmarks must not take over the machine. Decide what this
+machine may spend, derive it from `nproc` and your RAM (do not copy the example),
+and write it once to `bench/local.json` (gitignored). The default is half of the
+machine.
 
 ```json
 {"cpus": "0-15", "mem_gb": 32}
 ```
 
-Then smoke-test the benchmark (about 3 minutes):
+Then run two baselines you will compare against later:
 
 ```sh
-python3 bench/harness/run.py --quick --tools lake,candidate
+tests/run_all.sh -o .out-main                        # Lake's test suite on main (~5-10 min)
+python3 bench/harness/run.py --quick --tools lake,candidate   # harness smoke test (~3 min)
 ```
+
+The last command must end with `correctness of candidate: identical artifacts to
+lake, all builds ok, break check ok`. Quick runs are not standard runs; they are
+written to `bench/work/results/`, not to `research/results/`.
 
 ## 2. Orient (about 10 minutes)
 
@@ -87,11 +110,11 @@ python3 bench/harness/run.py --quick --tools lake,candidate
    it by hand.
 
 Then **profile before guessing**. Blake is Lake, so start from where Lake spends
-time on the scenarios that matter. Useful tools: `python3 bench/harness/run.py
---quick --keep` leaves per-tool corpus copies under `bench/work/corpora/` for ad hoc
-experiments; `lake build -v` prints every `lean` invocation; `strace -c`, `perf`,
-and Lean's `--profile` all work on the Blake binary. Baseline observations from the
-first run are listed at the end of this file.
+time on the scenarios that matter. `python3 bench/harness/run.py --quick --keep`
+leaves per-tool corpus copies under `bench/work/corpora/` for ad hoc experiments;
+`lake build -v` prints every `lean` invocation; on Linux `strace -c` and `perf`
+work on the Blake binary, and Lean's `--profile` works everywhere. Baseline
+observations from the first run are listed at the end of this file.
 
 ## 3. Pick one hypothesis (about 10 minutes)
 
@@ -101,8 +124,7 @@ medium corpora. Prefer measurement-driven ideas over architectural rewrites.
 
 Before writing code:
 
-1. Update `main` and branch from it: `git fetch origin && git switch -c
-   research/<slug> origin/main`.
+1. Update and branch: `git fetch origin && git switch -c research/<slug> origin/main`.
 2. Create your log entry from the template:
    `cp research/log/TEMPLATE.md research/log/$(date +%F)-<slug>.md` and fill in the
    hypothesis, why you believe it, and how you will measure it. The entry exists so
@@ -117,81 +139,104 @@ Before writing code:
 - Keep notes in your log entry as you go: what you tried, what surprised you.
 - If the implementation is not working after 60 minutes, stop, record what you
   learned, and go to step 7 with outcome `inconclusive`.
+- **Commit before you measure.** Results record the commit they measured;
+  measuring uncommitted code makes a result nobody can reproduce.
 
 ## 5. Verify correctness (about 10 minutes)
 
 All three must pass before measuring:
 
 ```sh
-lake build                           # Blake itself builds
-tests/run_all.sh                     # Lake's test suite (parallel, ~5-10 minutes)
-python3 bench/harness/run.py --quick --tools lake,candidate   # artifacts identical
+lake build                                   # Blake itself builds
+tests/run_all.sh --compare .out-main         # no test that passed on main fails now
+python3 bench/harness/run.py --quick --tools lake,candidate   # artifacts identical, break check ok
 ```
 
-The last command prints `correctness of candidate: identical artifacts to lake`.
-If it prints `ARTIFACTS DIFFER`, your change is wrong, not clever.
+If the harness prints `INCORRECT`, your change is wrong, not clever.
 
 ## 6. Measure (at most 30 minutes)
 
-Run the full sweep. It measures stock Lake, Blake `main`, and your candidate on the
-same corpora, in the same session, under the same caps:
+Run the standard sweep. It measures stock Lake, Blake `main` (the merge-base of
+your branch and `origin/main`), and your candidate on the same corpora, in the same
+session, under the same caps, and decides for you:
 
 ```sh
 python3 bench/harness/run.py --label <slug>
 ```
 
-It writes `research/results/<timestamp>-<machine>-<commit>.json` and prints a table
-plus speedup lines. The decision is made against **`main`** (Lake is context for the
-long-term target):
+It prints a table, `speedup ... vs main` and `vs lake` lines, one `verdict` line per
+corpus and scenario, and a final `verdict: success|neutral|failure` line, and writes
+`research/results/<timestamp>-<machine>-<commit>.json`. The rule it applies:
 
-- A scenario is **improved** when the candidate's median is faster than `main`'s by
-  more than the larger of 3% and `main`'s own min-to-max spread for that scenario.
-  It is **regressed** by the symmetric rule.
-- The iteration is a **success** when the candidate improves at least one primary
-  scenario on at least one corpus and regresses none (on any corpus, any scenario,
-  including `cold`).
-- If the numbers are within noise, rerun with `--repeat 5` before deciding. Never
-  tune the benchmark, corpora, or caps to make a result look better.
+- Per corpus and scenario, the candidate is compared with `main` using the
+  threshold `t = max(3%, main's (max − min) / median)` (`5%` for `cold`, which runs
+  once): **improved** if the candidate's median is below `(1 − t) × main`,
+  **regressed** if above `(1 + t) × main`.
+- **success**: at least one primary scenario improved on at least one corpus and
+  nothing regressed anywhere (including `cold`), with all correctness checks
+  passing. **failure**: anything regressed or any check failed. Otherwise
+  **neutral**.
+
+If a result looks like noise, rerun with `--repeat 5`. **Commit every result file
+the standard sweep writes**, including reruns and the ones you do not like. Never
+tune the benchmark, corpora, or caps to make a result look better.
 
 ## 7. Record (about 10 minutes)
 
-Finish your log entry: outcome (`success`, `failure`, or `inconclusive`), the
-speedup lines verbatim, the result file name, and what the next person should know.
+Finish your log entry: the outcome (`success`, `failure`, or `inconclusive`), the
+harness's speedup and verdict lines verbatim, the result file names, and what the
+next person should know.
 
-If the outcome is `success`, also:
+If the outcome is `success`, also write `research/ideas/<slug>.md` from
+`research/ideas/TEMPLATE.md`: the problem, the mechanism, where it lives in the
+code, measured gains, caveats.
 
-1. Write `research/ideas/<slug>.md` from `research/ideas/TEMPLATE.md`: the
-   problem, the mechanism, where it lives in the code, measured gains, caveats.
-2. Regenerate the leaderboard: `python3 bench/harness/leaderboard.py`.
+Commit on your branch:
 
-Commit the code (if any), the log entry, the result JSON, the idea write-up, and
-the leaderboard on your branch. Use clear commit messages; the first line should
-start with `research:` for successful iterations and `log:` for recorded failures.
+- `success`: the code, the log entry, the result JSON(s), and the idea write-up.
+  Commit messages and the PR title start with `research:`.
+- `failure` or `inconclusive`: **only** the log entry and result JSON(s), prefixed
+  `log:`. Do not include the code in the PR; describe the approach in the log and,
+  if the code is worth keeping, push it to a separate `research/<slug>-wip` branch
+  on your fork and link it from the log.
+
+Do not regenerate or commit `research/results/LEADERBOARD.md`; the maintainer does
+that after merging (it would conflict between concurrent PRs). You may run
+`python3 bench/harness/leaderboard.py` locally to look at it.
 
 ## 8. Submit
 
-Open a PR against `main` even for failures: negative results are part of the
-product. With the GitHub CLI:
+Open a PR against `adamtopaz/blake` `main` even for failures: negative results are
+part of the product.
 
 ```sh
-git push -u origin research/<slug>
-gh pr create --base main --title "research: <one line>" --body-file research/log/<your-entry>.md
+git push -u fork research/<slug>
+gh pr create --repo adamtopaz/blake --base main --head <your-github-user>:research/<slug> \
+  --title "research: <one line>" --body-file research/log/<your-entry>.md
 ```
 
-If `gh` is unavailable, push the branch and print the compare URL
-(`https://github.com/adamtopaz/blake/compare/main...research/<slug>`) so a human can
-open the PR. The maintainer reviews and merges; log-only PRs are merged quickly.
+(Use `log:` instead of `research:` in the title for failures and inconclusive
+results. Maintainers with push access may push the branch to `origin` instead.) If
+`gh` is unavailable, push the branch and print the compare URL
+`https://github.com/adamtopaz/blake/compare/main...<your-github-user>:research/<slug>`
+so a human can open the PR. The maintainer reviews and merges; log-only PRs are
+merged quickly. If `main` moves before your PR is merged, the maintainer may ask
+you to rebase and re-measure.
 
 ## Hard rules, in one place
 
 1. One hypothesis per iteration; about two hours; always end with a PR.
 2. Do not change `lean-toolchain`; do not patch Lean.
-3. Drop-in compatibility and Lake's test suite stay intact.
-4. `.olean`/`.ilean`/`.c` artifacts stay byte-identical to Lake's.
-5. Measure with the harness under caps; decide against `main` with the noise rule.
-6. Never modify the benchmark, corpora, or caps in the same PR as a build-tool
-   change. Benchmark changes are their own PRs, discussed first in an issue.
-7. Record every attempt, including failures, in `research/log/`.
+3. Drop-in compatibility stays intact; no test that passes on `main` may fail.
+4. Artifacts stay byte-identical to Lake's after every build; failures match Lake's.
+5. No benchmark-aware behavior, no machine-specific flags, no helper processes
+   that outlive the measured command, no ignoring the caps.
+6. Commit before measuring; measure with the standard sweep; commit every result
+   it writes; let the harness decide.
+7. Never modify the benchmark, corpora, caps, or harness in the same PR as a
+   build-tool change. Benchmark changes are their own PRs, discussed first in an
+   issue.
+8. Record every attempt, including failures, in `research/log/`.
 
 ## Map of the code
 
@@ -202,20 +247,30 @@ open the PR. The maintainer reviews and merges; log-only PRs are merged quickly.
 - `Lake/Build/Trace.lean`, `Lake/Build/Common.lean`: traces, hashes, up-to-date
   checks, artifact handling.
 - `Lake/Load/`: loading workspaces, manifests, and elaborating lakefiles.
-- `Lake/Config/`: package, library, workspace, environment, install detection.
+- `Lake/Config/`: package, library, workspace, environment, install detection
+  (`InstallPath.lean`: how `lake` finds `lean` and itself).
 - `Lake/CLI/`: the command line.
 - `LeanExport/`: parser for Lean's export format (used by `lake check`).
 - `bench/`: corpus generator and harness. `tests/`: Lake's test suite.
 
 ## Baseline observations (first run, 2026-10-29, 16 cores)
 
-- Blake and Lake produce identical artifacts and essentially identical cold,
+- Blake and Lake produce identical artifacts and essentially identical `cold`,
   `swarm`, and `hub` times: as expected, since Blake is Lake.
-- Blake's `noop` and `leaf` builds are ~60 ms slower than stock Lake's on every
-  corpus (0.21 s vs 0.15 s no-op on 200 modules). Blake's binary is statically
-  linked and built with `supportInterpreter`; stock `lake` is a small dynamically
-  linked executable. Startup cost is the first obvious lead.
+- Blake's `noop` and `leaf` builds are ~50-60 ms slower than stock Lake's on every
+  corpus (about 0.21 s vs 0.15 s no-op on 200 modules). Two candidate causes, both
+  unverified: Blake's binary is not installed next to `lean`, so on every
+  invocation it runs `lean --print-prefix` to locate the toolchain
+  (`Lake/Config/InstallPath.lean`; that subprocess costs ~30 ms here); and Blake's
+  binary is statically linked and built with `supportInterpreter`, while stock
+  `lake` is a small dynamically linked executable. Measure before fixing.
 - On a 200-module corpus a no-op build already costs ~0.15 s and a one-leaf edit
   ~0.4 s, of which ~0.1 s is `lean` startup. At 100k modules the per-module trace
   checking and the import loading inside each `lean` process dominate; measure how
   they scale with the `large-*` configs before optimizing them.
+- A `hub` edit rebuilds every transitive dependent even though an appended theorem
+  changes no downstream artifact. Lake invalidates by `.olean` hash; finer-grained
+  invalidation (by the interface a dependent actually uses) would pass the
+  byte-identical check and is the single largest lever on the `hub` and `swarm`
+  scenarios. The breaking-edit check exists to make sure such a scheme still
+  rebuilds dependents when it must.

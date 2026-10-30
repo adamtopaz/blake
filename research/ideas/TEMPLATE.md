@@ -1,6 +1,6 @@
 # <slug>: <title>
 
-- **Merged:** YYYY-MM-DD, PR <URL>
+- **Merged:** YYYY-MM-DD, PR <URL> (filled in by the maintainer on merge)
 - **Log entry:** ../log/YYYY-MM-DD-<slug>.md
 - **Scenarios improved:** noop / leaf / swarm / hub / cold
 

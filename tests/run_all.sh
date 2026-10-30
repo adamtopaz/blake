@@ -1,23 +1,27 @@
 #!/usr/bin/env bash
 # Added for Blake: run Lake's whole test suite in parallel and summarize.
 #
-# Usage: tests/run_all.sh [-j N] [-o OUTDIR] [--all] [TEST_DIR ...]
-#   -j N      parallel tests (default 8)
-#   -o DIR    where to put per-test logs and results.txt (default tests/.out)
-#   --all     include the slow/network tests (bootstrap, toolchain, online)
-#   TEST_DIR  specific tests, e.g. tests/init examples/hello (default: every test)
+# Usage: tests/run_all.sh [-j N] [-o OUTDIR] [--all] [--compare DIR] [TEST_DIR ...]
+#   -j N           parallel tests (default 8)
+#   -o DIR         where to put per-test logs and results.txt (default tests/.out)
+#   --all          include the slow/network tests (bootstrap, toolchain, online)
+#   --compare DIR  also report tests that pass in DIR/results.txt (an earlier run,
+#                  e.g. of main) but fail now; exit non-zero if there are any
+#   TEST_DIR       specific tests, e.g. tests/init examples/hello (default: every test)
 #
 # Uses the Blake binary built at the repository root unless LAKE is set, exactly
-# like run_test.sh. Exits non-zero if any test fails.
+# like run_test.sh. Exits non-zero if any test fails (or, with --compare, if any
+# test newly fails). Needs bash >= 3.2; on macOS install coreutils (gtail).
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
 
-JOBS=8; OUT=.out; ALL=0; TESTS=()
+JOBS=8; OUT=.out; ALL=0; COMPARE=""; TESTS=()
 while [ $# -gt 0 ]; do
   case "$1" in
     -j) JOBS=$2; shift 2 ;;
     -o) OUT=$2; shift 2 ;;
     --all) ALL=1; shift ;;
+    --compare) COMPARE=$2; shift 2 ;;
     *) TESTS+=("$1"); shift ;;
   esac
 done
@@ -30,10 +34,11 @@ if [ -z "${LEAN_CC:-}" ] && [ -x "$(lean --print-prefix)/bin/cc" ]; then
 fi
 
 if [ ${#TESTS[@]} -eq 0 ]; then
-  mapfile -t TESTS < <(ls -d tests/*/test.sh examples/*/test.sh extra/*/test.sh | xargs -n1 dirname)
-  if [ $ALL -eq 0 ]; then
-    mapfile -t TESTS < <(printf '%s\n' "${TESTS[@]}" | grep -v -E 'bootstrap|toolchain|online')
-  fi
+  while IFS= read -r d; do
+    if [ $ALL -eq 1 ] || ! echo "$d" | grep -q -E 'bootstrap|toolchain|online'; then
+      TESTS+=("$d")
+    fi
+  done < <(ls -d tests/*/test.sh examples/*/test.sh extra/*/test.sh | xargs -n1 dirname)
 fi
 
 mkdir -p "$OUT"
@@ -52,7 +57,20 @@ pass=$(grep -c '^PASS' "$OUT/results.txt" || true)
 fail=$(grep -c '^FAIL' "$OUT/results.txt" || true)
 echo "----"
 echo "$pass passed, $fail failed (logs in tests/$OUT/)"
+rc=0
 if [ "$fail" -gt 0 ]; then
   grep '^FAIL' "$OUT/results.txt"
-  exit 1
+  rc=1
 fi
+if [ -n "$COMPARE" ] && [ -f "$COMPARE/results.txt" ]; then
+  newly=$(comm -12 <(grep '^PASS' "$COMPARE/results.txt" | awk '{print $2}' | sort) \
+                   <(grep '^FAIL' "$OUT/results.txt" | awk '{print $2}' | sort) || true)
+  if [ -n "$newly" ]; then
+    echo "NEWLY FAILING compared to $COMPARE:"
+    echo "$newly"
+    rc=1
+  else
+    echo "no test that passed in $COMPARE fails now"
+  fi
+fi
+exit $rc

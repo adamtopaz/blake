@@ -28,11 +28,12 @@ import json
 import math
 import os
 import random
+import shutil
 import sys
 from collections import deque
 from pathlib import Path
 
-GENERATOR_VERSION = 2
+GENERATOR_VERSION = 3
 
 SHAPES = ("layered", "deep", "wide")
 
@@ -268,7 +269,7 @@ def render_module(i: int, imports: list[int], meta: str, cfg: dict, rng: random.
 def load_config(args: argparse.Namespace) -> dict:
     cfg = dict(DEFAULTS)
     if args.config:
-        with open(args.config) as f:
+        with open(args.config, encoding="utf-8") as f:
             cfg.update(json.load(f))
         cfg.setdefault("name", Path(args.config).stem)
     for key in DEFAULTS:
@@ -335,8 +336,10 @@ def main() -> None:
     cfg = load_config(args)
 
     out = Path(args.out)
-    if out.exists() and any(out.iterdir()) and not args.force:
-        sys.exit(f"{out} is not empty (use --force to overwrite)")
+    if out.exists() and any(out.iterdir()):
+        if not args.force:
+            sys.exit(f"{out} is not empty (use --force to overwrite)")
+        shutil.rmtree(out)
     (out / "Corpus").mkdir(parents=True, exist_ok=True)
 
     rng = random.Random(f"blake-corpus-v{GENERATOR_VERSION}-{cfg['seed']}-{cfg['shape']}-{cfg['modules']}")
@@ -351,13 +354,14 @@ def main() -> None:
         meta = f"layer {layer[i]}, {len(imports[i])} imports"
         text = render_module(i, imports[i], meta, cfg, mrng)
         path = out / module_path(i)
-        path.write_text(text)
+        data = text.encode("utf-8")
+        path.write_bytes(data)
         total_lines += text.count("\n")
-        sha.update(text.encode())
+        sha.update(data)
         modules.append({"name": module_name(i), "file": module_path(i),
                         "imports": [module_name(j) for j in imports[i]], "layer": layer[i]})
 
-    (out / "lakefile.toml").write_text(
+    (out / "lakefile.toml").write_text(encoding="utf-8", data=
         "# Generated benchmark corpus (bench/gen/generate.py); do not edit.\n"
         f"name = \"corpus\"\n"
         "defaultTargets = [\"Corpus\"]\n\n"
@@ -366,12 +370,12 @@ def main() -> None:
         "globs = [\"Corpus.+\"]\n")
 
     toolchain_src = Path(args.toolchain) if args.toolchain else Path(__file__).resolve().parents[2] / "lean-toolchain"
-    (out / "lean-toolchain").write_text(toolchain_src.read_text())
+    (out / "lean-toolchain").write_text(toolchain_src.read_text(encoding="utf-8"), encoding="utf-8")
 
     stats = graph_stats(imports)
     stats["lines"] = total_lines
     stats["content_sha256"] = sha.hexdigest()
-    (out / "corpus.json").write_text(json.dumps({
+    (out / "corpus.json").write_text(encoding="utf-8", data=json.dumps({
         "config": cfg,
         "stats": {k: v for k, v in stats.items() if k != "transitive_dependents"},
         "modules": [dict(m, transitive_dependents=stats["transitive_dependents"][i])
