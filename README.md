@@ -10,6 +10,15 @@ pinned in [`lean-toolchain`](lean-toolchain).
 The code is unchanged from upstream Lake except where noted below; the `Lake`
 module namespace and the `lake` executable name are kept.
 
+## Research loop
+
+Blake is also the home of a crowd-sourced research program to make it build
+gigantic Lean projects much faster than Lake does. Anyone can contribute an
+iteration by pointing a coding agent at [`instructions.md`](instructions.md);
+the benchmark lives in [`bench/`](bench/README.md) and the accumulated knowledge
+(successful ideas, every attempt, and the leaderboard) in
+[`research/`](research/results/LEADERBOARD.md).
+
 ## License
 
 Blake is distributed under the Apache License 2.0, the same license as Lean 4;

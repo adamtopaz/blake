@@ -1,10 +1,10 @@
 {
  "shape": "deep",
- "modules": 1500,
+ "modules": 1000,
  "seed": 1,
  "imports_mean": 3.0,
  "decls_per_module": 10,
  "work": 2,
- "chains": 16,
+ "chains": 12,
  "cross_prob": 0.3
 }

@@ -1,6 +1,6 @@
 {
  "shape": "layered",
- "modules": 1500,
+ "modules": 1000,
  "seed": 1,
  "imports_mean": 3.0,
  "decls_per_module": 10,
