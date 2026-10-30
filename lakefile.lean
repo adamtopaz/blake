@@ -53,8 +53,29 @@ lean_lib Lake where
   -- `Lake.Check` links the export parser, which is vendored in-tree as `LeanExport`
   needs := #[LeanExport]
 
+/-
+Blake (2026-10-30): `blake-zygote`, a fork server that runs `lean`'s own driver
+(`lean_shell_main`) in pre-initialized children (see `c/blake_zygote.c` and
+`Lake/Build/Zygote.lean`). It links the toolchain's `libleanshared` so that it is
+initialized exactly like `lean`.
+-/
+target blakeZygote pkg : FilePath := do
+  let srcJob ← inputTextFile <| pkg.dir / "c" / "blake_zygote.c"
+  let oJob ← buildLeanO (pkg.buildDir / "c" / "blake_zygote.o") srcJob (traceArgs := #["-O2"])
+  let libDir ← getLeanLibDir
+  let cc ← getLeanCc
+  let linkFlags := (← getLeanInstall).ccLinkFlags (shared := true)
+  oJob.mapM fun oFile => do
+    let exe := pkg.binDir / "blake-zygote"
+    addPlatformTrace
+    addLeanTrace
+    buildFileUnlessUpToDate' exe do
+      compileExe exe (#[oFile.toString, "-L", libDir.toString, "-lleanshared",
+        s!"-Wl,-rpath,{libDir}"] ++ linkFlags) cc
+    return exe
+
 @[default_target]
 lean_exe lake where
   root := `LakeMain
-  needs := #[Lake]
+  needs := #[Lake, blakeZygote]
   supportInterpreter := true

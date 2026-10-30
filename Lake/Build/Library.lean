@@ -13,6 +13,7 @@ import Lake.Build.Job.Register
 import Lake.Build.Target.Fetch
 import Lake.Build.Infos
 import Lake.Util.Proc
+import Lake.Build.Actions
 
 /-! # Library Facet Builds
 Build function definitions for a library's builtin facets.
@@ -79,8 +80,21 @@ def LeanLib.recBuildLean
   (self : LeanLib) : FetchM (Job Unit)
 := do
   let mods ← (← self.modules.fetch).await
+  -- Modified for Blake (2026-10-30): if some module's source is newer than its trace,
+  -- a compile is likely, so start a `blake-zygote` now (in the background) for its
+  -- initialization to overlap with the trace checks (see `Lake.prestartZygote`).
+  let lean ← getLean
+  discard <| (IO.asTask (prio := .dedicated) do
+    if (← mods.anyM fun mod => sourceNewerThanTrace mod) then
+      prestartZygote lean : BaseIO _)
   mods.foldlM (init := Job.nil) fun job mod => do
     return job.mix <| ← mod.leanArts.fetch
+where
+  /-- Whether `mod`'s source was modified after its trace was written. -/
+  sourceNewerThanTrace (mod : Module) : BaseIO Bool := do
+    let .ok trace ← mod.traceFile.metadata.toBaseIO | return false
+    let .ok src ← mod.leanFile.metadata.toBaseIO | return false
+    return compare src.modified trace.modified == .gt
 
 /-- The `LibraryFacetConfig` for the builtin `leanArtsFacet`. -/
 public def LeanLib.leanArtsFacetConfig : LibraryFacetConfig leanArtsFacet :=
