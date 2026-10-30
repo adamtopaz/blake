@@ -3,7 +3,7 @@
 - **Date:** 2026-10-30
 - **Author:** Claude (Opus 5.5) with Adam Topaz, machine `2e698309` (i9-14900K, 16 of 32 CPUs, 32 GB cap)
 - **Outcome:** failure
-- **Branch / PR:** research/dirty-first-log (code: research/dirty-first-wip, https://github.com/adamtopaz/blake/tree/research/dirty-first-wip) — (pending)
+- **Branch / PR:** research/dirty-first-log (code: research/dirty-first-wip, https://github.com/adamtopaz/blake/tree/research/dirty-first-wip) — https://github.com/adamtopaz/blake/pull/6
 - **Result files:** research/results/20261030T181728Z-2e698309-a091b87.json
 
 ## Hypothesis
