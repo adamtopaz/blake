@@ -168,12 +168,29 @@ def scanJobs (new unfinished : Array OpaqueJob) : MonitorM (Array OpaqueJob × A
   let r ← unfinished.foldlM pollJobs (#[], #[])
   new.foldlM pollJobs r
 
-def sleep : MonitorM PUnit := do
-  let now ← IO.monoMsNow
-  let lastUpdate := (← get).lastUpdate
-  let sleepTime : Nat := (← read).updateFrequency - (now - lastUpdate)
-  if sleepTime > 0 then
-    IO.sleep sleepTime.toUInt32
+/-
+Modified for Blake (2026-10-30): the monitor used to sleep for the rest of the
+`updateFrequency` (100 ms) between scans, so every build ended up to 100 ms after
+its last job finished; a no-op build spent most of its time waiting here. It now
+wakes up as soon as every job it is waiting on has finished (`waitUntil`).
+-/
+
+/--
+Waits until every job in `unfinished` from index `i` on has finished or the
+monotonic clock reaches `deadline` (ms), whichever comes first. Polls in 1 ms
+slices, advancing past finished jobs, so each job is checked about once.
+-/
+partial def waitUntil (unfinished : Array OpaqueJob) (deadline : Nat) (i : Nat) : BaseIO PUnit := do
+  if h : i < unfinished.size then
+    if (← IO.hasFinished unfinished[i].task) then
+      waitUntil unfinished deadline (i + 1)
+    else if (← IO.monoMsNow) < deadline then
+      IO.sleep 1
+      waitUntil unfinished deadline i
+
+def sleep (unfinished : Array OpaqueJob) : MonitorM PUnit := do
+  let deadline := (← get).lastUpdate + (← read).updateFrequency
+  waitUntil unfinished deadline 0
   let now ← IO.monoMsNow
   modify fun s => {s with lastUpdate := now}
 
@@ -188,7 +205,7 @@ partial def loop
         tk.set
   if h : 0 < unfinished.size then
     renderProgress running unfinished h
-    sleep
+    sleep unfinished
     let new ← drainQueue
     loop new unfinished
   else
