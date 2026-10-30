@@ -26,6 +26,26 @@ open Lean hiding SearchPath
 
 namespace Lake
 
+/-
+Modified for Blake (2026-10-30): adaptive thread counts for `lean`. Every `lean`
+process used to start as many threads as Lake itself may use (`LEAN_NUM_THREADS`,
+or the hardware concurrency). When Lake runs that many `lean` processes at once,
+that is up to cap² threads on cap CPUs. Each process now gets
+`max 1 (cap / n)` threads, where `n` is the number of `lean` processes running
+when it starts (itself included): a lone `lean` (a leaf edit, the tail of a
+chain) keeps all of them, and a full machine is not oversubscribed. The thread
+count does not affect what `lean` writes.
+-/
+
+/-- Number of `lean` processes Lake is currently running. -/
+private builtin_initialize runningLeanProcs : IO.Ref Nat ← IO.mkRef 0
+
+/-- The number of threads Lake and `lean` default to: `LEAN_NUM_THREADS` if set, else the hardware concurrency. -/
+private def leanThreadCap : BaseIO Nat := do
+  if let some n := (← IO.getEnv "LEAN_NUM_THREADS").bind (·.toNat?) then
+    if n > 0 then return n
+  return (System.Platform.Internal.getHardwareConcurrency ()).toNat
+
 public def compileLeanModule
   (leanFile relLeanFile : FilePath)
   (setup : ModuleSetup) (setupFile : FilePath)
@@ -56,13 +76,19 @@ public def compileLeanModule
   args := args ++ #["--setup", setupFile.toString]
   args := args.push "--json"
   withLogErrorPos do
-  let out ← rawProc {
-    args
-    cmd := lean.toString
-    env := #[
-      ("LEAN_PATH", leanPath.toString)
-    ]
-  }
+  -- Blake: see `runningLeanProcs`.
+  let running ← runningLeanProcs.modifyGet fun n => (n + 1, n + 1)
+  let cap ← leanThreadCap
+  -- An indeterminate hardware concurrency (`cap = 0`) leaves `lean` to its own default.
+  let threadsEnv := if cap = 0 then #[] else #[("LEAN_NUM_THREADS", some (toString (max 1 (cap / running))))]
+  let out ← try
+    rawProc {
+      args
+      cmd := lean.toString
+      env := #[("LEAN_PATH", some leanPath.toString)] ++ threadsEnv
+    }
+  finally
+    runningLeanProcs.modify (· - 1)
   let outLogPos ← getLogPos
   unless out.stdout.isEmpty do
     let txt ← out.stdout.split '\n' |>.foldM (init := "") fun (txt : String) ln => do
