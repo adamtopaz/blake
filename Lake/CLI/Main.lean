@@ -1127,7 +1127,9 @@ private def runBuiltinLint
     leanOptOverrides := overrides
   }
   ws.runBuild (buildSpecs specs) buildCfg
-  Lean.searchPathRef.set ws.augmentedLeanPath
+  -- Modified for Blake (2026-10-29): include the Lean toolchain's library directory,
+  -- which `augmentedLeanPath` omits when `lake` is not co-located with `lean`.
+  Lean.initSearchPath ws.lakeEnv.lean.sysroot ws.augmentedLeanPath
   BuiltinLint.run args
 
 protected def lint : CliM PUnit := do
@@ -1190,7 +1192,8 @@ protected def shake : CliM PUnit := do
     unless upToDate do
       error "there are out of date oleans; run `lake build` or fetch them from a cache first"
   -- Run shake with workspace search paths
-  Lean.searchPathRef.set ws.augmentedLeanPath
+  -- Modified for Blake (2026-10-29): see `builtinLint` above.
+  Lean.initSearchPath ws.lakeEnv.lean.sysroot ws.augmentedLeanPath
   let exitCode ← Shake.run args ws.augmentedLeanSrcPath
   if exitCode != 0 then
     exit exitCode
