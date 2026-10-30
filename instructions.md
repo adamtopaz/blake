@@ -168,13 +168,13 @@ It prints a table, `speedup ... vs main` and `vs lake` lines, one `verdict` line
 corpus and scenario, and a final `verdict: success|neutral|failure` line, and writes
 `research/results/<timestamp>-<machine>-<commit>.json`. The rule it applies:
 
-- Per corpus and scenario: a scenario that takes under 2 s is run 10 times and
-  the two tools' **minima** are compared with a 7% threshold (sub-second build
-  times on a shared machine are bimodal, so minima are the robust statistic); a
-  longer scenario is run 3 times and the **medians** are compared with threshold
-  `max(3%, either tool's (max − min) / median)`; `cold` runs once with 7%.
-  **improved** if the candidate is below `(1 − t) × main`, **regressed** if above
-  `(1 + t) × main`. Tables and speedup lines always show medians.
+- Per corpus and scenario, the tools are interleaved and compared on **paired
+  runs**: repetition *i* of the candidate against repetition *i* of `main`, and
+  the speedup is the median of those ratios (a shared machine toggles between
+  speed states over seconds; pairing cancels that). Scenarios under 2 s get 10
+  repetitions and a 7% threshold, longer ones 3 repetitions and 3%, `cold` runs
+  once with 7%. **improved** if the paired speedup is at least `1 + t`,
+  **regressed** if at most `1 − t`. Tables and speedup lines show medians.
 - **success**: at least one primary scenario improved on at least one corpus and
   nothing regressed anywhere (including `cold`), with all correctness checks
   passing. **failure**: anything regressed or any check failed. Otherwise

@@ -87,15 +87,17 @@ an enforced CPU cap. Standard runs
 are written to `research/results/` and are the only ones the leaderboard counts;
 everything else goes to `bench/work/results/` (or `--out`).
 
-The verdict compares the candidate with `main` per corpus and scenario. Scenarios
-under 2 s are compared on the **minimum** of their 10 runs with a 7% threshold:
-on a shared machine their timings are bimodal (the same binary alternates between
-two modes ~20% apart), which defeats medians and spreads but not minima. Longer
-scenarios are compared on **medians** with `t = max(3%, either tool's
-(max − min) / median)`; `cold`, which runs once, uses 7%. Improved below
-`(1 − t) × main`, regressed above `(1 + t) × main`. Two builds of identical source
-measured against each other stay within these thresholds; that is what they were
-calibrated on (see `research/log/2026-10-29-baseline.md`). Overall: `failure` if any correctness
+The verdict compares the candidate with `main` per corpus and scenario on
+**paired runs**: because the tools are interleaved, repetition *i* of the candidate
+and repetition *i* of `main` ran within seconds of each other, so their ratio
+cancels the machine's drift between speed states (the same binary alternates
+between modes ~20% apart over seconds, which defeats medians, spreads, and
+minima alike). The speedup is the median of those ratios; scenarios under 2 s get
+10 repetitions and a 7% threshold, longer ones 3 repetitions and 3%, `cold` (one
+run) 7%. Improved at `≥ 1 + t`, regressed at `≤ 1 − t`. Two builds of identical
+source stayed within 5.5% under this statistic on the reference machine; see
+`research/log/2026-10-29-baseline.md`. `--rescore FILE` recomputes a stored
+result's verdict under the current rule and records that it did. Overall: `failure` if any correctness
 check failed or anything regressed; `success` if a primary scenario improved and
 nothing regressed; otherwise `neutral`. The harness exits with status 2 on
 `failure`.

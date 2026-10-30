@@ -26,16 +26,18 @@ candidate whose artifacts ever differ, whose builds fail, or which leaves
 processes behind is INCORRECT regardless of speed.
 
 Verdict (printed and stored): per corpus and scenario the candidate is compared
-with `main`. Sub-second build times on a shared machine are bimodal (the same
-binary alternates between two modes ~20% apart), so scenarios whose first run
-takes under 2 s are run --repeat-fast times (default 10) and compared on their
-*minimum* with a 7% threshold; longer scenarios are run --repeat times (default
-3) and compared on their *median* with threshold max(3%, spread/median of either
-tool); `cold` runs once and uses 7%. Improved iff candidate < (1 - t) * main,
-regressed iff candidate > (1 + t) * main. Overall: `failure` if anything is
-incorrect or any scenario regressed; `success` if at least one primary scenario
-improved and nothing regressed; otherwise `neutral`. Tables and speedup lines
-always report medians.
+with `main` on *paired* runs. The machine toggles between speed states over
+seconds (the same binary alternates between modes ~20% apart), so the tools are
+interleaved and repetition i of the candidate is compared with repetition i of
+main: speedup = median over i of main_i / candidate_i. Scenarios whose first run
+takes under 2 s get --repeat-fast repetitions (default 10) and a 7% threshold;
+longer ones get --repeat (default 3) and 3%; `cold` runs once and uses 7%.
+Improved iff speedup >= 1 + t, regressed iff speedup <= 1 - t. Overall:
+`failure` if anything is incorrect or any scenario regressed; `success` if at
+least one primary scenario improved and nothing regressed; otherwise `neutral`.
+Two builds of identical source stay within 5.5% under this statistic on the
+reference machine. Tables and speedup lines report medians. `--rescore FILE`
+recomputes the verdict of a stored result under the current rule.
 
 Typical use:
   python3 bench/harness/run.py                 # standard sweep: medium-*, lake+main+candidate, repeat 3
@@ -90,10 +92,13 @@ PRIMARY_SCENARIOS = ("noop", "leaf", "swarm", "hub")
 DEFAULT_TOOLS = "lake,main,candidate"
 ARTIFACT_EXTS = (".olean", ".ilean", ".c")
 BUILD_TIMEOUT_S = 1800
-NOISE_FLOOR = 0.03        # median-based comparison of long scenarios
-NOISE_FLOOR_FAST = 0.07   # min-based comparison of scenarios under FAST_SECONDS
+NOISE_FLOOR = 0.03        # paired comparison of scenarios taking >= FAST_SECONDS
+NOISE_FLOOR_FAST = 0.07   # paired comparison of scenarios under FAST_SECONDS
 FAST_SECONDS = 2.0
-COLD_THRESHOLD = 0.07
+COLD_THRESHOLD = 0.07     # cold runs once, so the comparison is a single pair
+NOISE_RULE = {"statistic": "median of paired per-repetition ratios main_i / candidate_i",
+              "floor": NOISE_FLOOR, "floor_fast": NOISE_FLOOR_FAST, "fast_seconds": FAST_SECONDS,
+              "cold_threshold": COLD_THRESHOLD}
 SCRUB_PREFIXES = ("LAKE_", "LEAN_")
 SCRUB_EXACT = ("LEAN", "ELAN_TOOLCHAIN", "XDG_CACHE_HOME", "TMPDIR", "CC", "AR", "CURL")
 
@@ -714,16 +719,18 @@ def verdicts(measurements: dict, correctness: dict, tools: list[str]) -> dict:
             if m.get("median_wall_s") is None or c.get("median_wall_s") is None:
                 continue
             if scen == "cold":
-                t, stat = COLD_THRESHOLD, "median"
+                t = COLD_THRESHOLD
             elif m["median_wall_s"] < FAST_SECONDS:
-                t, stat = NOISE_FLOOR_FAST, "min"
+                t = NOISE_FLOOR_FAST
             else:
-                t, stat = max(NOISE_FLOOR, (m["max_wall_s"] - m["min_wall_s"]) / m["median_wall_s"],
-                              (c["max_wall_s"] - c["min_wall_s"]) / c["median_wall_s"]), "median"
-            mv, cv = m[f"{stat}_wall_s"], c[f"{stat}_wall_s"]
-            ratio = mv / cv
-            state = "improved" if cv < (1 - t) * mv else ("regressed" if cv > (1 + t) * mv else "same")
-            out["per_scenario"][f"{cfg_name}/{scen}"] = {"statistic": stat, "main_s": mv, "candidate_s": cv,
+                t = NOISE_FLOOR
+            m_ok = [x["wall_s"] for x in m["runs"] if x["exit_code"] == 0]
+            c_ok = [x["wall_s"] for x in c["runs"] if x["exit_code"] == 0]
+            n = min(len(m_ok), len(c_ok))
+            ratio = statistics.median(m_ok[i] / c_ok[i] for i in range(n))
+            state = "improved" if ratio >= 1 + t else ("regressed" if ratio <= 1 - t else "same")
+            out["per_scenario"][f"{cfg_name}/{scen}"] = {"statistic": "paired", "pairs": n,
+                                                          "main_s": m["median_wall_s"], "candidate_s": c["median_wall_s"],
                                                           "speedup": round(ratio, 4), "threshold": round(t, 4), "state": state}
             if state == "improved":
                 out["improved"].append(f"{cfg_name}/{scen}")
@@ -790,11 +797,26 @@ def print_report(result: dict) -> None:
                                          for k, v in c.items() if not (v["identical"] and v["builds_ok"] and v["break_ok"]))))
     v = result["verdict"]
     for key, s in v.get("per_scenario", {}).items():
-        print(f"verdict {key}: {s['state']} ({s['statistic']}: main {s['main_s']:.2f}s, candidate {s['candidate_s']:.2f}s, "
-              f"speedup {s['speedup']:.3f}x, threshold {s['threshold'] * 100:.0f}%)")
+        print(f"verdict {key}: {s['state']} (paired speedup {s['speedup']:.3f}x over {s['pairs']} runs, "
+              f"threshold {s['threshold'] * 100:.0f}%; medians main {s['main_s']:.2f}s, candidate {s['candidate_s']:.2f}s)")
     print(f"verdict: {v['overall']}" + (f" ({'; '.join(v['reasons'])})" if v.get("reasons") else ""))
     print(f"standard run: {'yes' if result['standard'] else 'no (' + ', '.join(result['nonstandard_reasons']) + ')'}")
     print()
+
+
+def rescore(path: Path) -> None:
+    """Recompute speedup and verdict of a stored result from its raw runs."""
+    result = json.loads(path.read_text(encoding="utf-8"))
+    previous = result.get("verdict", {}).get("overall")
+    result["speedup"] = ratios(result["measurements"], result["tool_order"])
+    result["verdict"] = verdicts(result["measurements"], result["correctness"], result["tool_order"])
+    result.setdefault("rescored", []).append({
+        "at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+        "run_py_sha256": sha256_file(Path(__file__)), "noise_rule": NOISE_RULE, "previous_verdict": previous})
+    result["noise_rule"] = NOISE_RULE
+    path.write_text(json.dumps(result, indent=1) + "\n", encoding="utf-8")
+    print_report(result)
+    log(f"rescored {path}: {previous} -> {result['verdict']['overall']}")
 
 
 def main() -> None:
@@ -811,7 +833,11 @@ def main() -> None:
     ap.add_argument("--out", default=None, help="result JSON path (default: research/results/ for standard runs, else bench/work/results/)")
     ap.add_argument("--label", default="", help="free-form label stored in the result (e.g. the idea's slug)")
     ap.add_argument("--keep", action="store_true", help="keep per-tool corpus copies after the run")
+    ap.add_argument("--rescore", metavar="FILE", help="recompute the verdict of an existing result file under the current rule and exit")
     args = ap.parse_args()
+    if args.rescore:
+        rescore(Path(args.rescore))
+        return
 
     caps = default_caps()
     if args.cpus:
@@ -924,8 +950,7 @@ def main() -> None:
         "tool_order_per_corpus": orders,
         "repeat": args.repeat,
         "repeat_fast": args.repeat_fast,
-        "noise_rule": {"floor": NOISE_FLOOR, "floor_fast": NOISE_FLOOR_FAST, "fast_seconds": FAST_SECONDS,
-                       "cold_threshold": COLD_THRESHOLD},
+        "noise_rule": NOISE_RULE,
         "scenarios": scenarios,
         "corpora": corpora_meta,
         "measurements": measurements,
