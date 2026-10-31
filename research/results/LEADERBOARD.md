@@ -15,6 +15,7 @@ and hub. Runs on different machines are only comparable through these ratios.
 
 | date (UTC) | machine | cpus | branch | commit | label | verdict | vs main primary | vs lake primary | correct | standard | duration | file |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 2026-10-31 22:50 | 2e698309 | 16 | research/spec-compile | 5d37e98 | spec-compile | success | 1.001x | 1.573x | yes | yes | 28 min | `20261031T225057Z-2e698309-5d37e98.json` |
 | 2026-10-31 20:29 | 2e698309 | 16 | research/critical-nice | 3e49371 | critical-nice | success | 0.988x | 1.528x | yes | yes | 28 min | `20261031T202904Z-2e698309-3e49371.json` |
 | 2026-10-31 18:47 | 2e698309 | 16 | research/defer-parsers | 3df6fda | defer-parsers | success | 1.050x | 1.593x | yes | yes | 28 min | `20261031T184727Z-2e698309-3df6fda.json` |
 | 2026-10-31 17:03 | 2e698309 | 16 | research/bucket-store | ce6e2f0 | bucket-store | success | 1.034x | 1.515x | yes | yes | 28 min | `20261031T170303Z-2e698309-ce6e2f0.json` |
@@ -41,23 +42,23 @@ and hub. Runs on different machines are only comparable through these ratios.
 
 ## Per-scenario detail of the newest standard run per machine
 
-### 2e698309: Intel(R) Core(TM) i9-14900K (16 cpus, 32 GB cap), 2026-10-31, commit 3e49371
+### 2e698309: Intel(R) Core(TM) i9-14900K (16 cpus, 32 GB cap), 2026-10-31, commit 5d37e98
 
 | corpus | scenario | lake | main | candidate |
 |---|---|---|---|---|
-| medium-deep | cold | 37.19 s | 33.83 s | 33.77 s |
-| medium-deep | noop | 0.18 s | 0.07 s | 0.08 s |
-| medium-deep | leaf | 0.51 s | 0.32 s | 0.34 s |
-| medium-deep | swarm | 15.49 s | 14.51 s | 14.41 s |
-| medium-deep | hub | 35.81 s | 33.33 s | 33.08 s |
-| medium-layered | cold | 39.36 s | 35.97 s | 34.97 s |
-| medium-layered | noop | 0.18 s | 0.08 s | 0.09 s |
+| medium-deep | cold | 38.60 s | 35.30 s | 35.07 s |
+| medium-deep | noop | 0.18 s | 0.08 s | 0.07 s |
+| medium-deep | leaf | 0.57 s | 0.34 s | 0.33 s |
+| medium-deep | swarm | 15.36 s | 14.69 s | 14.54 s |
+| medium-deep | hub | 36.78 s | 33.97 s | 33.40 s |
+| medium-layered | cold | 39.80 s | 37.99 s | 37.46 s |
+| medium-layered | noop | 0.18 s | 0.07 s | 0.07 s |
 | medium-layered | leaf | 0.57 s | 0.34 s | 0.34 s |
-| medium-layered | swarm | 14.17 s | 13.36 s | 13.20 s |
-| medium-layered | hub | 35.29 s | 31.81 s | 31.71 s |
-| medium-wide | cold | 34.87 s | 31.56 s | 31.64 s |
-| medium-wide | noop | 0.17 s | 0.07 s | 0.06 s |
-| medium-wide | leaf | 0.38 s | 0.17 s | 0.18 s |
-| medium-wide | swarm | 1.39 s | 0.91 s | 0.91 s |
-| medium-wide | hub | 35.40 s | 32.48 s | 31.87 s |
+| medium-layered | swarm | 14.34 s | 13.72 s | 13.54 s |
+| medium-layered | hub | 35.79 s | 32.89 s | 32.94 s |
+| medium-wide | cold | 35.36 s | 32.24 s | 32.12 s |
+| medium-wide | noop | 0.17 s | 0.07 s | 0.07 s |
+| medium-wide | leaf | 0.37 s | 0.17 s | 0.17 s |
+| medium-wide | swarm | 1.45 s | 0.90 s | 0.94 s |
+| medium-wide | hub | 35.80 s | 31.89 s | 31.55 s |
 
