@@ -58,6 +58,14 @@ private structure Zygote where
   nextId : IO.Ref Nat
   /-- Set by the reader once the zygote's output has ended. -/
   dead : IO.Ref Bool
+  /--
+  Signaled (under `replyLock`) whenever a reply has been delivered. Compiles wait on this
+  OS-level condition variable rather than with `IO.wait`: a worker blocked in `IO.wait`
+  makes Lean's task manager start another worker, which would let more compiles run at
+  once than Lake's job limit allows.
+  -/
+  replyLock : Std.BaseMutex
+  replied : Std.Condvar
   reader : Task (Except IO.Error Unit)
 
 /-- The build's zygote, if started. -/
@@ -81,7 +89,7 @@ private def zygoteFor? (lean : FilePath) : BaseIO (Option FilePath) := do
 /-- Resolves the pending compiles from the zygote's replies; fails them all at the end. -/
 private partial def readZygoteReplies
   (child : ZygoteChild) (pending : IO.Ref (Std.HashMap Nat (IO.Promise (Option Nat))))
-  (dead : IO.Ref Bool)
+  (dead : IO.Ref Bool) (replyLock : Std.BaseMutex) (replied : Std.Condvar)
 : IO Unit := do
   try
     loop
@@ -89,7 +97,12 @@ private partial def readZygoteReplies
     dead.set true
     for (_, p) in ← pending.modifyGet (·, {}) do
       p.resolve none
+    notify
 where
+  notify : BaseIO Unit := do
+    replyLock.lock
+    replied.notifyAll
+    replyLock.unlock
   loop : IO Unit := do
     let line ← child.stdout.getLine
     if line.isEmpty then return
@@ -97,6 +110,7 @@ where
       if let (some id, some code) := (id.toNat?, code.toNat?) then
         if let some p ← pending.modifyGet fun m => (m.get? id, m.erase id) then
           p.resolve (some code)
+          notify
     loop
 
 /-- The build's zygote, started (once) if needed. -/
@@ -108,8 +122,12 @@ private def getZygote (zygote : FilePath) : IO Zygote := do
     let child ← IO.Process.spawn {cmd := zygote.toString, stdin := .piped, stdout := .piped, stderr := .inherit}
     let pending ← IO.mkRef {}
     let dead ← IO.mkRef false
-    let reader ← IO.asTask (prio := .dedicated) (readZygoteReplies child pending dead)
-    let z := {child, writeLock := ← Std.BaseMutex.new, pending, nextId := ← IO.mkRef 0, dead, reader}
+    let replyLock ← Std.BaseMutex.new
+    let replied ← Std.Condvar.new
+    let reader ← IO.asTask (prio := .dedicated) (readZygoteReplies child pending dead replyLock replied)
+    let writeLock ← Std.BaseMutex.new
+    let nextId ← IO.mkRef 0
+    let z : Zygote := {child, writeLock, pending, nextId, dead, replyLock, replied, reader}
     zygoteRef.set (some z)
     return z
   finally
@@ -140,6 +158,11 @@ private def runLeanZygote
       z.child.stdin.flush
     finally
       z.writeLock.unlock
+    -- Wait on the condition variable, not with `IO.wait` (see `Zygote.replied`).
+    z.replyLock.lock
+    while !(← promise.isResolved) do
+      z.replied.wait z.replyLock
+    z.replyLock.unlock
     let some code := (← IO.wait promise.result?).join
       | return none
     return some {exitCode := code.toUInt32, stdout := ← IO.FS.readFile outFile, stderr := ← IO.FS.readFile errFile}
