@@ -3,7 +3,7 @@
 - **Date:** 2026-10-30
 - **Author:** Claude (Opus 5.5) with Adam Topaz, machine `2e698309` (i9-14900K, 16 of 32 CPUs, 32 GB cap)
 - **Outcome:** success
-- **Branch / PR:** research/one-zygote — (pending)
+- **Branch / PR:** research/one-zygote — https://github.com/adamtopaz/blake/pull/10
 - **Result files:** research/results/20261031T034724Z-2e698309-2fc8bd6.json (commit `2fc8bd6`, before the fix: failure), research/results/20261031T043239Z-2e698309-216c449.json (commit `216c449`, the PR's code: success)
 
 ## Hypothesis
