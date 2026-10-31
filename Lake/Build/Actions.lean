@@ -178,8 +178,65 @@ public def prestartZygote (lean : FilePath) : BaseIO Unit := do
   let some zygote ← zygoteFor? lean | return
   discard (getZygote zygote).toBaseIO
 
-/-- Stop the build's `blake-zygote` (at the end of a build; it may not outlive Lake). -/
+/-
+Modified for Blake (2026-10-31, `header-stub`): a module's header snapshot (see
+`Module.headerSnapshot`) is saved by a separate `lean` run on a stub file that holds
+only the module's header. It runs alongside the module's compile and does not hold up
+the module's job; the build waits for it at its end (`stopZygotes`).
+-/
+
+/-- A header snapshot to save alongside a compile (see `Module.headerSnapshot`). -/
+public structure HeaderSave where
+  /-- The module's header: the text of its source up to its first command. -/
+  header : String
+  /-- The snapshot file; `lean` also writes `<snapshot>.deps`. -/
+  snapshot : FilePath
+  /-- Runs once the snapshot has been saved. -/
+  onSaved : IO Unit
+
+/-- The header saves of this build that may still be running. -/
+private builtin_initialize headerSavesRef : IO.Ref (Array (Task (Except IO.Error Unit))) ←
+  IO.mkRef #[]
+
+/-- Runs `lean` without logging, through the zygote when possible; returns its exit code. -/
+private def runLeanQuiet (lean : FilePath) (args : Array String) (leanPath : SearchPath) : IO UInt32 := do
+  if let some zygote ← zygoteFor? lean then
+    if let some sysroot := lean.parent >>= (·.parent) then
+      if let some out ← runLeanZygote zygote args (leanPath ++ [sysroot / "lib" / "lean"]).toString then
+        return out.exitCode
+  let out ← IO.Process.output {cmd := lean.toString, args, env := #[("LEAN_PATH", leanPath.toString)]}
+  return out.exitCode
+
+/--
+Starts saving a header snapshot in the background: `lean` with the module's arguments
+and setup file runs on a stub holding the module's header (so its header, positions
+included, is the module's, which is what `--incr-load` checks) and saves the snapshot.
+-/
+private def startHeaderSave
+  (save : HeaderSave) (lean : FilePath) (leanArgs : Array String) (setupFile : FilePath)
+  (leanPath : SearchPath)
+: IO Unit := do
+  let stub := save.snapshot.addExtension "lean"
+  IO.FS.writeFile stub save.header
+  let args := leanArgs ++ #[stub.toString, "--setup", setupFile.toString,
+    s!"--incr-header-save={save.snapshot}", "--json"]
+  let task ← IO.asTask (prio := .dedicated) do
+    let ok ← try pure ((← runLeanQuiet lean args leanPath) == 0) catch _ => pure false
+    removeFileIfExists stub
+    if ok && (← save.snapshot.pathExists) then
+      save.onSaved
+    else
+      removeFileIfExists save.snapshot
+      removeFileIfExists (save.snapshot.addExtension "deps")
+  headerSavesRef.modify (·.push task)
+
+/--
+Stop the build's `blake-zygote` (at the end of a build; it may not outlive Lake),
+after waiting for the header saves still running.
+-/
 public def stopZygotes : BaseIO Unit := do
+  for t in ← headerSavesRef.modifyGet (·, #[]) do
+    discard <| IO.wait t
   zygoteLock.lock
   let z? ← zygoteRef.modifyGet (·, none)
   zygoteLock.unlock
@@ -204,7 +261,7 @@ public def compileLeanModule
   (lean : FilePath := "lean")
   (leanir : FilePath := "leanir")
   (incrLoad? : Option FilePath := none)
-  (incrHeaderSave? : Option FilePath := none)
+  (headerSave? : Option HeaderSave := none)
 : LogIO Unit := do
   let mut args := leanArgs.push leanFile.toString
   if let some oleanFile := arts.olean? then
@@ -248,14 +305,15 @@ public def compileLeanModule
     rawProc spawnArgs
   -- Modified for Blake (2026-10-31): Lean's header snapshots, for modules being edited
   -- (see `Module.headerSnapshot`).
-  let incrArgs :=
-    (incrLoad?.map (s!"--incr-load={·}")).toArray ++
-    (incrHeaderSave?.map (s!"--incr-header-save={·}")).toArray
+  if let some save := headerSave? then
+    startHeaderSave save lean leanArgs setupFile leanPath
+  let incrArgs := (incrLoad?.map (s!"--incr-load={·}")).toArray
   let mut out ← run (args ++ incrArgs)
   if let some snap := incrLoad? then
     -- `lean` reports errors in the source as JSON on stdout and exits with code 1.
     -- Anything else means that the snapshot could not be used: compile without it.
     if out.exitCode ≠ 0 && (out.exitCode ≠ 1 || !out.stderr.isEmpty) then
+      removeFileIfExists (snap.addExtension "key")
       removeFileIfExists snap
       removeFileIfExists (snap.addExtension "deps")
       out ← run args

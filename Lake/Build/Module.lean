@@ -1003,24 +1003,26 @@ not changed. The files sit next to the module's C file: `<mod>.blake-header` (th
 snapshot), `<mod>.blake-header.deps` (its list of imported files, written by `lean`),
 and `<mod>.blake-header.key`, whose first line is `saved` (the snapshot exists) or
 `edited` (the module was edited once with these inputs), followed by the key: every
-input of the compile except the source (`ModulePreSetup.headerHash`, `lean`, the
-search path, the arguments, and the module setup with the paths of all imports).
+input of the compile except the source after its header (`ModulePreSetup.headerHash`,
+`lean`, the search path, the arguments, the module setup with the paths of all
+imports, and the text of the header itself).
 
-A module counts as edited if its source is newer than its trace file. Saving costs
-time and disk, so it is done on the second edit in a row with the same key, and the
-snapshot is loaded from the third on. Any other rebuild discards it. Modules that
-load plugins or dynamic libraries never use snapshots (a loaded header does not load
-them again), nor does a `lean` other than the one Blake was built with.
+A module counts as edited if its source is newer than its trace file. On the second
+edit in a row with the same key, the snapshot is saved by a separate `lean` run on a
+stub holding just the header, alongside the compile (`HeaderSave`); from the third
+on, the compile resumes from it. Any other rebuild discards it. Modules that load
+plugins or dynamic libraries never use snapshots (a resumed header does not load them
+again), nor does a `lean` other than the one Blake was built with.
 
-Returns `(incrLoad?, incrHeaderSave?, action to run after a successful compile)`.
+Returns `(incrLoad?, headerSave?, action to run after a successful compile)`.
 -/
 private def Module.headerSnapshot
   (mod : Module) (presetup : ModulePreSetup) (setup : ModuleSetup)
   (args : Array String) (leanPath : System.SearchPath) (lean : FilePath)
-: JobM (Option FilePath × Option FilePath × IO Unit) := do
+: JobM (Option FilePath × Option HeaderSave × IO Unit) := do
   let snap := mod.irPath "blake-header"
   let deps := snap.addExtension "deps"
-  let keyFile := mod.irPath "blake-header.key"
+  let keyFile := snap.addExtension "key"
   let edited ← show IO Bool from
     (do return (← getMTime mod.traceFile) < presetup.srcMTime) <|> pure false
   let record? ← show IO (Option String) from
@@ -1034,15 +1036,21 @@ private def Module.headerSnapshot
   let sameLean ← match lean.parent >>= (·.parent) with
     | some sysroot => initOleanHasLeanGithash sysroot
     | none => pure false
+  -- The header: the source up to its first command, as Lake's import parser reads it.
+  let header? ← show IO (Option String) from do
+    let src ← IO.FS.readFile presetup.srcFile
+    let s := Lean.ParseImports.main src (Lean.ParseImports.whitespace src {})
+    return if s.error?.isSome then none else some (String.Pos.Raw.extract src 0 s.pos)
+  let some header := header? | do discard; return (none, none, pure ())
   if loadsCode || !sameLean then
     discard
     return (none, none, pure ())
-  let key := s!"{presetup.headerHash}\n{lean}\n{leanPath}\n{args}\n{(toJson setup).compress}\n"
+  let key := s!"{presetup.headerHash}\n{lean}\n{leanPath}\n{args}\n{(toJson setup).compress}\n{header}"
   if record? == some ("saved\n" ++ key) && (← snap.pathExists) && (← deps.pathExists) then
     return (some snap, none, pure ())
   if edited && record? == some ("edited\n" ++ key) then
     discard
-    return (none, some snap, IO.FS.writeFile keyFile ("saved\n" ++ key))
+    return (none, some {header, snapshot := snap, onSaved := IO.FS.writeFile keyFile ("saved\n" ++ key)}, pure ())
   if record?.isSome then
     discard
   if edited then
@@ -1059,17 +1067,11 @@ def Module.buildLean
   let leanPath ← getLeanPath
   let lean ← getLean
   -- Modified for Blake (2026-10-31): header snapshots (see `Module.headerSnapshot`).
-  let (incrLoad?, incrHeaderSave?, recordSnapshot) ←
+  let (incrLoad?, headerSave?, recordSnapshot) ←
     mod.headerSnapshot presetup setup args leanPath lean
   mod.clearOutputArtifacts
-  try
-    compileLeanModule presetup.srcFile relSrcFile setup mod.setupFile arts args
-      leanPath lean (← getLeanir) incrLoad? incrHeaderSave?
-  catch e =>
-    if let some snap := incrHeaderSave? then
-      removeFileIfExists snap
-      removeFileIfExists (snap.addExtension "deps")
-    throw e
+  compileLeanModule presetup.srcFile relSrcFile setup mod.setupFile arts args
+    leanPath lean (← getLeanir) incrLoad? headerSave?
   recordSnapshot
   mod.clearOutputHashes
   mod.computeArtifacts setup.isModule
