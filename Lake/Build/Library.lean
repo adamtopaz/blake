@@ -25,6 +25,23 @@ namespace Lake
 
 /-! ## Build Lean & Static Lib -/
 
+/-- Whether `mod`'s source was modified after its trace was written. -/
+private def sourceNewerThanTrace (mod : Module) : BaseIO Bool := do
+  let .ok trace ← mod.traceFile.metadata.toBaseIO | return false
+  let .ok src ← mod.leanFile.metadata.toBaseIO | return false
+  return compare src.modified trace.modified == .gt
+
+/-
+Modified for Blake (2026-10-31): edited modules are found at the very start of a
+library's build. `recCollectLocalModules` starts a background scan of its root modules
+for sources newer than their traces; if it finds any, it starts the build's
+`blake-zygote` right away (so the zygote's initialization overlaps module discovery and
+trace checking), and `recBuildLean` creates those modules' jobs before all others.
+-/
+
+/-- The background scan for edited modules, per library, of the current build. -/
+private builtin_initialize editedModulesRef : IO.Ref (NameMap (Task (Array Module))) ← IO.mkRef {}
+
 private structure ModuleCollection where
   mods : Array Module := #[]
   modSet : ModuleSet := ∅
@@ -43,6 +60,14 @@ partial def LeanLib.recCollectLocalModules
   -- before descending into them, so they run in parallel; the walk fetches exactly
   -- these jobs anyway (fetches are memoized), so the set of jobs is unchanged.
   let roots ← self.getModuleArray
+  -- Blake: see `editedModulesRef`.
+  let lean ← getLean
+  let scan ← BaseIO.asTask (prio := .dedicated) do
+    let edited ← roots.filterM sourceNewerThanTrace
+    unless edited.isEmpty do
+      prestartZygote lean
+    return edited
+  editedModulesRef.modify (·.insert self.name scan)
   for mod in roots do
     discard <| mod.imports.fetch
   let mut col : ModuleCollection := {}
@@ -80,21 +105,14 @@ def LeanLib.recBuildLean
   (self : LeanLib) : FetchM (Job Unit)
 := do
   let mods ← (← self.modules.fetch).await
-  -- Modified for Blake (2026-10-30): if some module's source is newer than its trace,
-  -- a compile is likely, so start a `blake-zygote` now (in the background) for its
-  -- initialization to overlap with the trace checks (see `Lake.prestartZygote`).
-  let lean ← getLean
-  discard <| (IO.asTask (prio := .dedicated) do
-    if (← mods.anyM fun mod => sourceNewerThanTrace mod) then
-      prestartZygote lean : BaseIO _)
+  -- Modified for Blake (2026-10-31): create the jobs of edited modules first (see
+  -- `editedModulesRef`). Fetches are memoized, so the fold below gets the same jobs back
+  -- and mixes them in the original order.
+  if let some scan := (← editedModulesRef.get).find? self.name then
+    for mod in scan.get do
+      discard <| mod.leanArts.fetch
   mods.foldlM (init := Job.nil) fun job mod => do
     return job.mix <| ← mod.leanArts.fetch
-where
-  /-- Whether `mod`'s source was modified after its trace was written. -/
-  sourceNewerThanTrace (mod : Module) : BaseIO Bool := do
-    let .ok trace ← mod.traceFile.metadata.toBaseIO | return false
-    let .ok src ← mod.leanFile.metadata.toBaseIO | return false
-    return compare src.modified trace.modified == .gt
 
 /-- The `LibraryFacetConfig` for the builtin `leanArtsFacet`. -/
 public def LeanLib.leanArtsFacetConfig : LibraryFacetConfig leanArtsFacet :=
