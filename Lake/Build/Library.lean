@@ -32,6 +32,30 @@ private structure ModuleCollection where
   hasErrors : Bool := false
 
 /--
+The `--incr-load` argument that `Module.headerSnapshot` will likely choose for an
+edited module: `some none` for none, `some (some snap)` for a saved snapshot, and
+`none` when it will likely save one (then there is no point in speculating).
+-/
+private def headerSnapshotLoad? (mod : Module) : BaseIO (Option (Option FilePath)) := do
+  let snap := mod.irPath "blake-header"
+  match (← (IO.FS.readFile (snap.addExtension "key")).toBaseIO) with
+  | .ok s =>
+    if s.startsWith "saved\n" then
+      if (← snap.pathExists) && (← (snap.addExtension "deps").pathExists) then
+        return some (some snap)
+      return some none
+    else if s.startsWith "edited\n" then
+      return none
+    else
+      return some none
+  | .error _ => return some none
+/-- Whether `mod`'s source was modified after its trace was written. -/
+private def sourceNewerThanTrace (mod : Module) : BaseIO Bool := do
+  let .ok trace ← mod.traceFile.metadata.toBaseIO | return false
+  let .ok src ← mod.leanFile.metadata.toBaseIO | return false
+  return compare src.modified trace.modified == .gt
+
+/--
 Collect the local modules of a library.
 That is, the modules from `getModuleArray` plus their local transitive imports.
 -/
@@ -44,6 +68,23 @@ partial def LeanLib.recCollectLocalModules
   -- before descending into them, so they run in parallel; the walk fetches exactly
   -- these jobs anyway (fetches are memoized), so the set of jobs is unchanged.
   let roots ← self.getModuleArray
+  -- Modified for Blake (2026-10-30, moved 2026-10-31): if some module's source is newer
+  -- than its trace, a compile is likely, so start a `blake-zygote` now (in the
+  -- background) for its initialization to overlap with discovery and the trace checks
+  -- (see `Lake.prestartZygote`).
+  let lean ← getLean
+  -- Modified for Blake (2026-10-31, `spec-compile`): and compile edited modules whose
+  -- imports are not edited speculatively (see `Lake.speculateCompile`).
+  let leanPath ← getLeanPath
+  discard <| (IO.asTask (prio := .dedicated) do
+    let edited ← roots.filterM fun mod => sourceNewerThanTrace mod
+    unless edited.isEmpty do
+      prestartZygote lean
+      let names : Std.HashSet String := edited.foldl (·.insert ·.name.toString) {}
+      for mod in edited do
+        if let some incrLoad? ← headerSnapshotLoad? mod then
+          speculateCompile lean leanPath mod.leanFile mod.setupFile mod.oleanFile mod.ileanFile
+            mod.cFile (mod.weakLeanArgs ++ mod.leanArgs) incrLoad? names : BaseIO _)
   for mod in roots do
     discard <| mod.imports.fetch
   let mut col : ModuleCollection := {}
@@ -81,48 +122,8 @@ def LeanLib.recBuildLean
   (self : LeanLib) : FetchM (Job Unit)
 := do
   let mods ← (← self.modules.fetch).await
-  -- Modified for Blake (2026-10-30): if some module's source is newer than its trace,
-  -- a compile is likely, so start a `blake-zygote` now (in the background) for its
-  -- initialization to overlap with the trace checks (see `Lake.prestartZygote`).
-  let lean ← getLean
-  -- Modified for Blake (2026-10-31, `spec-compile`): and compile edited modules whose
-  -- imports are not edited speculatively (see `Lake.speculateCompile`).
-  let leanPath ← getLeanPath
-  discard <| (IO.asTask (prio := .dedicated) do
-    let edited ← mods.filterM fun mod => sourceNewerThanTrace mod
-    unless edited.isEmpty do
-      prestartZygote lean
-      let names : Std.HashSet String := edited.foldl (·.insert ·.name.toString) {}
-      for mod in edited do
-        if let some incrLoad? ← headerSnapshotLoad? mod then
-          speculateCompile lean leanPath mod.leanFile mod.setupFile mod.oleanFile mod.ileanFile
-            mod.cFile (mod.weakLeanArgs ++ mod.leanArgs) incrLoad? names : BaseIO _)
   mods.foldlM (init := Job.nil) fun job mod => do
     return job.mix <| ← mod.leanArts.fetch
-where
-  /--
-  The `--incr-load` argument that `Module.headerSnapshot` will likely choose for an
-  edited module: `some none` for none, `some (some snap)` for a saved snapshot, and
-  `none` when it will likely save one (then there is no point in speculating).
-  -/
-  headerSnapshotLoad? (mod : Module) : BaseIO (Option (Option FilePath)) := do
-    let snap := mod.irPath "blake-header"
-    match (← (IO.FS.readFile (snap.addExtension "key")).toBaseIO) with
-    | .ok s =>
-      if s.startsWith "saved\n" then
-        if (← snap.pathExists) && (← (snap.addExtension "deps").pathExists) then
-          return some (some snap)
-        return some none
-      else if s.startsWith "edited\n" then
-        return none
-      else
-        return some none
-    | .error _ => return some none
-  /-- Whether `mod`'s source was modified after its trace was written. -/
-  sourceNewerThanTrace (mod : Module) : BaseIO Bool := do
-    let .ok trace ← mod.traceFile.metadata.toBaseIO | return false
-    let .ok src ← mod.leanFile.metadata.toBaseIO | return false
-    return compare src.modified trace.modified == .gt
 
 /-- The `LibraryFacetConfig` for the builtin `leanArtsFacet`. -/
 public def LeanLib.leanArtsFacetConfig : LibraryFacetConfig leanArtsFacet :=
