@@ -99,8 +99,13 @@ lean_exe lake where
   needs := #[Lake, blakeZygote]
   supportInterpreter := true
   moreLinkObjs := #[blakeInit]
-  -- See `c/blake_init.c`; `--wrap` is a GNU linker option, used on Linux only.
+  -- See `c/blake_init.c` (its `DEFERRED` list must match the modules here); `--wrap`
+  -- is a GNU linker option, used on Linux only.
   moreLinkArgs :=
     if System.Platform.isWindows || System.Platform.isOSX then #[] else
-      #["lean_initialize", "lean_io_initializing", "runtime_initialize_LeanExport_Basic",
-        "runtime_initialize_Lake_CLI_Check"].map (s!"-Wl,--wrap={·}")
+      (#["lean_initialize", "lean_io_initializing"] ++
+        #["Lean_Parser_Term", "Lean_Parser_Do", "Lean_Parser_Command", "Lean_Parser_Tactic",
+          "Lean_Parser_Module", "Lean_Parser", "LeanExport_Basic", "Lake_Util_Binder",
+          "Lake_Config_Meta", "Lake_DSL", "Lake_Load_Lean", "Lake_CLI_Check",
+          "Lake_CLI_Translate", "Lake_CLI_BuiltinLint", "Lake_CLI_Shake", "Lake_CLI_Serve",
+          "Lake_CLI_Init"].map (s!"runtime_initialize_{·}")).map (s!"-Wl,--wrap={·}")

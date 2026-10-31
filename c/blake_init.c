@@ -9,15 +9,28 @@ imports all of `Lean`. Together they are most of Blake's start-up (~30 ms), alth
 uses (`Lake.Load.Toml`, `Lake.Build.*`).
 
 On Linux, the `lake` executable is linked with `--wrap` for `lean_initialize`,
-`lean_io_initializing`, and the runtime initializers of `LeanExport.Basic` and
-`Lake.CLI.Check` (the only modules that bring in `LeanExport`):
+`lean_io_initializing`, and the runtime initializers of the modules in `DEFERRED`
+below (the list in `lakefile.lean` must match):
 - At start-up, `lean_initialize()` initializes only the runtime and the C++ utilities
-  (what it does before `initialize_Init`), and the two module initializers do nothing.
+  (what it does before `initialize_Init`), and the deferred initializers do nothing.
 - `blake_full_initialize` (Lake's `fullInitialize`) does the rest exactly as
-  `lean_initialize()` would, plus the two deferred initializers. Lake calls it before
+  `lean_initialize()` would, plus the deferred initializers. Lake calls it before
   any command other than `build` and before loading a configuration written in Lean.
   Initializers may only register attributes and extensions while `IO.initializing` is
   true, so it reports true while they run.
+
+Modified for Blake (2026-10-31, `defer-parsers`): besides `LeanExport.Basic` and
+`Lake.CLI.Check` (the only modules that bring in `LeanExport`, which imports all of
+`Lean`), `DEFERRED` holds Lean's builtin parsers (`Lean.Parser.Term`, `Do`, `Command`,
+`Module`, `Tactic`, and `Lean.Parser`), which a TOML build does not use (the TOML
+grammar has its own combinators and token table, and `ParseImportsFast` its own
+parser), and the Lake modules whose initialization needs them or the elaborator:
+the lakefile DSL (`Lake.DSL`, plus `Lake.Config.Meta` and `Lake.Util.Binder`, which
+build parsers at initialization and are used only by macros), the Lean configuration
+loader (`Lake.Load.Lean`), and the commands `translate-config`, `lint`, `shake`,
+`serve`, `new`/`init`. A deferred module's code must not run before
+`blake_full_initialize`. A module imported only through deferred modules stays
+uninitialized until then, too.
 Elsewhere `lean_initialize()` is not wrapped and `blake_full_initialize` does nothing.
 */
 #include <lean/lean.h>
@@ -28,8 +41,18 @@ void lean_initialize_runtime_module(void);
 lean_object * initialize_Init(uint8_t builtin);
 lean_object * initialize_Std(uint8_t builtin);
 lean_object * initialize_Lean(uint8_t builtin);
-lean_object * __real_runtime_initialize_LeanExport_Basic(uint8_t builtin);
-lean_object * __real_runtime_initialize_Lake_CLI_Check(uint8_t builtin);
+
+/* The modules whose runtime initializers are deferred, in the order
+   `blake_full_initialize` runs them (Lean's own are run by `initialize_Lean` first). */
+#define DEFERRED(X) \
+  X(Lean_Parser_Term) X(Lean_Parser_Do) X(Lean_Parser_Command) X(Lean_Parser_Tactic) \
+  X(Lean_Parser_Module) X(Lean_Parser) X(LeanExport_Basic) X(Lake_Util_Binder) \
+  X(Lake_Config_Meta) X(Lake_DSL) X(Lake_Load_Lean) X(Lake_CLI_Check) \
+  X(Lake_CLI_Translate) X(Lake_CLI_BuiltinLint) X(Lake_CLI_Shake) X(Lake_CLI_Serve) \
+  X(Lake_CLI_Init)
+
+#define DECLARE_REAL(m) lean_object * __real_runtime_initialize_##m(uint8_t builtin);
+DEFERRED(DECLARE_REAL)
 uint8_t __real_lean_io_initializing(void);
 
 /* The steps of `lean_initialize()` (Lean v4.35.0, `src/initialize/init.cpp`) after the
@@ -59,13 +82,11 @@ void __wrap_lean_initialize(void) {
   _ZN4lean18initialize_optionsEv();
 }
 
-lean_object * __wrap_runtime_initialize_LeanExport_Basic(uint8_t builtin) {
-  return g_in_full ? __real_runtime_initialize_LeanExport_Basic(builtin) : lean_io_result_mk_ok(lean_box(0));
-}
-
-lean_object * __wrap_runtime_initialize_Lake_CLI_Check(uint8_t builtin) {
-  return g_in_full ? __real_runtime_initialize_Lake_CLI_Check(builtin) : lean_io_result_mk_ok(lean_box(0));
-}
+#define DEFINE_WRAP(m) \
+  lean_object * __wrap_runtime_initialize_##m(uint8_t builtin) { \
+    return g_in_full ? __real_runtime_initialize_##m(builtin) : lean_io_result_mk_ok(lean_box(0)); \
+  }
+DEFERRED(DEFINE_WRAP)
 
 /* `BaseIO` externs take no world token and return their value unboxed (Lean v4.35.0). */
 uint8_t __wrap_lean_io_initializing(void) {
@@ -93,8 +114,8 @@ LEAN_EXPORT lean_object * blake_full_initialize(void) {
     _ZN4lean25initialize_library_moduleEv();
     _ZN4lean31initialize_constructions_moduleEv();
   }
-  if (!err) err = run(__real_runtime_initialize_LeanExport_Basic(1));
-  if (!err) err = run(__real_runtime_initialize_Lake_CLI_Check(1));
+#define RUN_REAL(m) if (!err) err = run(__real_runtime_initialize_##m(1));
+  DEFERRED(RUN_REAL)
   g_in_full = 0;
   if (err) {
     lean_io_result_show_error(err);
