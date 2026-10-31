@@ -12,6 +12,9 @@ import Lake.Util.FilePath
 import Lake.Util.IO
 import Lake.Util.Url
 import Lake.Config.InstallPath
+import Std.Data.HashMap
+import Std.Sync.Mutex
+import Init.Data.String.Legacy
 import Init.Data.String.Search
 import Init.Data.String.TakeDrop
 import Init.System.Platform
@@ -40,11 +43,36 @@ otherwise, or if anything goes wrong, Lake runs `lean` as before.
 private abbrev ZygoteChild :=
   IO.Process.Child {stdin := .piped, stdout := .piped, stderr := .inherit}
 
-/-- Idle `blake-zygote` processes. -/
-private builtin_initialize zygoteIdle : IO.Ref (List ZygoteChild) ← IO.mkRef []
+/-
+Modified for Blake (2026-10-30, `one-zygote`): one zygote per build serves all compiles,
+which it runs concurrently in separate children; requests carry an id and replies come
+back as `<id> <exit code>` lines, read by one reader task.
+-/
 
-/-- Every `blake-zygote` process started, so they can be stopped (see `stopZygotes`). -/
-private builtin_initialize zygoteAll : IO.Ref (Array ZygoteChild) ← IO.mkRef #[]
+private structure Zygote where
+  child : ZygoteChild
+  /-- Serializes writes of requests. -/
+  writeLock : Std.BaseMutex
+  /-- Compiles waiting for their reply, by request id. -/
+  pending : IO.Ref (Std.HashMap Nat (IO.Promise (Option Nat)))
+  nextId : IO.Ref Nat
+  /-- Set by the reader once the zygote's output has ended. -/
+  dead : IO.Ref Bool
+  /--
+  Signaled (under `replyLock`) whenever a reply has been delivered. Compiles wait on this
+  OS-level condition variable rather than with `IO.wait`: a worker blocked in `IO.wait`
+  makes Lean's task manager start another worker, which would let more compiles run at
+  once than Lake's job limit allows.
+  -/
+  replyLock : Std.BaseMutex
+  replied : Std.Condvar
+  reader : Task (Except IO.Error Unit)
+
+/-- The build's zygote, if started. -/
+private builtin_initialize zygoteRef : IO.Ref (Option Zygote) ← IO.mkRef none
+
+/-- Serializes starting and stopping the zygote. -/
+private builtin_initialize zygoteLock : Std.BaseMutex ← Std.BaseMutex.new
 
 /-- The `blake-zygote` to use for the `lean` at `lean`, if any. -/
 private def zygoteFor? (lean : FilePath) : BaseIO (Option FilePath) := do
@@ -58,6 +86,53 @@ private def zygoteFor? (lean : FilePath) : BaseIO (Option FilePath) := do
   unless (← initOleanHasLeanGithash sysroot) do return none
   return some zygote
 
+/-- Resolves the pending compiles from the zygote's replies; fails them all at the end. -/
+private partial def readZygoteReplies
+  (child : ZygoteChild) (pending : IO.Ref (Std.HashMap Nat (IO.Promise (Option Nat))))
+  (dead : IO.Ref Bool) (replyLock : Std.BaseMutex) (replied : Std.Condvar)
+: IO Unit := do
+  try
+    loop
+  finally
+    dead.set true
+    for (_, p) in ← pending.modifyGet (·, {}) do
+      p.resolve none
+    notify
+where
+  notify : BaseIO Unit := do
+    replyLock.lock
+    replied.notifyAll
+    replyLock.unlock
+  loop : IO Unit := do
+    let line ← child.stdout.getLine
+    if line.isEmpty then return
+    if let [id, code] := line.trimAscii.copy.splitOn " " then
+      if let (some id, some code) := (id.toNat?, code.toNat?) then
+        if let some p ← pending.modifyGet fun m => (m.get? id, m.erase id) then
+          p.resolve (some code)
+          notify
+    loop
+
+/-- The build's zygote, started (once) if needed. -/
+private def getZygote (zygote : FilePath) : IO Zygote := do
+  zygoteLock.lock
+  try
+    if let some z ← zygoteRef.get then
+      return z
+    let child ← IO.Process.spawn {cmd := zygote.toString, stdin := .piped, stdout := .piped, stderr := .inherit}
+    let pending ← IO.mkRef {}
+    let dead ← IO.mkRef false
+    let replyLock ← Std.BaseMutex.new
+    let replied ← Std.Condvar.new
+    let reader ← IO.asTask (prio := .dedicated) (readZygoteReplies child pending dead replyLock replied)
+    let writeLock ← Std.BaseMutex.new
+    let nextId ← IO.mkRef 0
+    let z : Zygote := {child, writeLock, pending, nextId, dead, replyLock, replied, reader}
+    zygoteRef.set (some z)
+    return z
+  finally
+    zygoteLock.unlock
+
 /--
 Compile with `blake-zygote`: `args` as for `lean`, with `LEAN_PATH` set to `leanPath`.
 Returns `none` if the zygote failed (Lake then runs `lean` itself).
@@ -65,51 +140,60 @@ Returns `none` if the zygote failed (Lake then runs `lean` itself).
 private def runLeanZygote
   (zygote : FilePath) (args : Array String) (leanPath : String)
 : IO (Option IO.Process.Output) := do
-  let child ← match ← zygoteIdle.modifyGet fun | z :: zs => (some z, zs) | [] => (none, []) with
-    | some z => pure z
-    | none =>
-      let z ← IO.Process.spawn {cmd := zygote.toString, stdin := .piped, stdout := .piped, stderr := .inherit}
-      zygoteAll.modify (·.push z)
-      pure z
+  let z ← getZygote zygote
+  let id ← z.nextId.modifyGet fun n => (n, n + 1)
+  let promise ← IO.Promise.new
+  z.pending.modify (·.insert id promise)
+  if (← z.dead.get) then
+    if let some p ← z.pending.modifyGet fun m => (m.get? id, m.erase id) then
+      p.resolve none
   let (_, outFile) ← IO.FS.createTempFile
   let (_, errFile) ← IO.FS.createTempFile
   try
-    let fields := #[outFile.toString, errFile.toString, leanPath, "lean"] ++ args
-    child.stdin.putStr <| fields.foldl (init := s!"{fields.size}\x00") (· ++ · ++ "\x00")
-    child.stdin.flush
-    let some code := (← child.stdout.getLine).trimAscii.copy.toNat?
-      | return none -- the zygote died; it is not returned to the pool
-    zygoteIdle.modify (child :: ·)
+    let fields := #[toString id, outFile.toString, errFile.toString, leanPath, "lean"] ++ args
+    let request := fields.foldl (init := s!"{fields.size}\x00") (· ++ · ++ "\x00")
+    z.writeLock.lock
+    try
+      z.child.stdin.putStr request
+      z.child.stdin.flush
+    finally
+      z.writeLock.unlock
+    -- Wait on the condition variable, not with `IO.wait` (see `Zygote.replied`).
+    z.replyLock.lock
+    while !(← promise.isResolved) do
+      z.replied.wait z.replyLock
+    z.replyLock.unlock
+    let some code := (← IO.wait promise.result?).join
+      | return none
     return some {exitCode := code.toUInt32, stdout := ← IO.FS.readFile outFile, stderr := ← IO.FS.readFile errFile}
   finally
     try IO.FS.removeFile outFile catch _ => pure ()
     try IO.FS.removeFile errFile catch _ => pure ()
 
 /--
-Start one `blake-zygote` for the `lean` at `lean` ahead of time, if none is running yet,
-so that its initialization overlaps with whatever the build does before its first compile.
+Start the build's `blake-zygote` for the `lean` at `lean` ahead of time, so that its
+initialization overlaps with whatever the build does before its first compile.
 -/
 public def prestartZygote (lean : FilePath) : BaseIO Unit := do
   let some zygote ← zygoteFor? lean | return
-  unless (← zygoteAll.get).isEmpty do return
-  let spawn : IO ZygoteChild :=
-    IO.Process.spawn {cmd := zygote.toString, stdin := .piped, stdout := .piped, stderr := .inherit}
-  if let .ok z ← spawn.toBaseIO then
-    zygoteAll.modify (·.push z)
-    zygoteIdle.modify (z :: ·)
+  discard (getZygote zygote).toBaseIO
 
-/-- Stop all `blake-zygote` processes (at the end of a build; none may outlive Lake). -/
+/-- Stop the build's `blake-zygote` (at the end of a build; it may not outlive Lake). -/
 public def stopZygotes : BaseIO Unit := do
-  let zs ← zygoteAll.modifyGet (·, #[])
-  zygoteIdle.set []
-  -- Ask every zygote to stop before reaping any, so that their exits overlap.
-  for z in zs do
-    let ask : IO Unit := do
-      z.stdin.putStr "0\x00"
-      z.stdin.flush
-    ask.catchExceptions fun _ => z.kill.catchExceptions fun _ => pure ()
-  for z in zs do
-    (discard z.wait : IO Unit).catchExceptions fun _ => pure ()
+  zygoteLock.lock
+  let z? ← zygoteRef.modifyGet (·, none)
+  zygoteLock.unlock
+  let some z := z? | return
+  let stop : IO Unit := do
+    z.writeLock.lock
+    try
+      z.child.stdin.putStr "0\x00"
+      z.child.stdin.flush
+    finally
+      z.writeLock.unlock
+    discard <| IO.wait z.reader
+    discard z.child.wait
+  stop.catchExceptions fun _ => z.child.kill.catchExceptions fun _ => pure ()
 
 public def compileLeanModule
   (leanFile relLeanFile : FilePath)
