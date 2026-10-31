@@ -61,17 +61,27 @@ initialized exactly like `lean`.
 -/
 target blakeZygote pkg : FilePath := do
   let srcJob ← inputTextFile <| pkg.dir / "c" / "blake_zygote.c"
-  let oJob ← buildLeanO (pkg.buildDir / "c" / "blake_zygote.o") srcJob (traceArgs := #["-O2"])
+  -- The toolchain's bundled clang has only the headers that Lean's generated C needs
+  -- (`-nostdinc`); the zygote needs POSIX headers, so it is built with `LEAN_CC` if
+  -- set, else the system `cc`. If that fails, Blake still builds and runs `lean`.
+  let lean ← getLeanInstall
+  let cc : FilePath := if lean.customCc then lean.cc else "cc"
+  let inc ← getLeanIncludeDir
   let libDir ← getLeanLibDir
-  let cc ← getLeanCc
-  let linkFlags := (← getLeanInstall).ccLinkFlags (shared := true)
-  oJob.mapM fun oFile => do
+  srcJob.mapM fun src => do
     let exe := pkg.binDir / "blake-zygote"
     addPlatformTrace
     addLeanTrace
+    addPureTrace cc.toString "cc"
+    let args := #["-o", exe.toString, src.toString, "-O2", "-I", inc.toString,
+      "-L", libDir.toString, "-lleanshared", s!"-Wl,-rpath,{libDir}",
+      s!"-Wl,-rpath-link,{libDir}", "-lpthread"]
     buildFileUnlessUpToDate' exe do
-      compileExe exe (#[oFile.toString, "-L", libDir.toString, "-lleanshared",
-        s!"-Wl,-rpath,{libDir}"] ++ linkFlags) cc
+      createParentDirs exe
+      let out ← rawProc {cmd := cc.toString, args}
+      unless out.exitCode == 0 do
+        logWarning s!"blake-zygote could not be built (Blake will run `lean` directly):\n{out.stderr}"
+        IO.FS.writeFile exe "" -- placeholder; `zygoteFor?` ignores a non-executable zygote
     return exe
 
 @[default_target]

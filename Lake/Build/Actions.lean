@@ -51,7 +51,9 @@ private def zygoteFor? (lean : FilePath) : BaseIO (Option FilePath) := do
   let .ok appPath ← IO.appPath.toBaseIO | return none
   let some appDir := appPath.parent | return none
   let zygote := appDir / "blake-zygote"
-  unless (← zygote.pathExists) do return none
+  -- An empty file is the build's placeholder for a zygote that could not be built.
+  let .ok md ← zygote.metadata.toBaseIO | return none
+  unless md.byteSize > 0 do return none
   let some sysroot := lean.parent >>= (·.parent) | return none
   unless (← initOleanHasLeanGithash sysroot) do return none
   return some zygote
