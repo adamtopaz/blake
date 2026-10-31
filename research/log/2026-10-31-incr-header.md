@@ -3,7 +3,7 @@
 - **Date:** 2026-10-31
 - **Author:** Claude (Opus 5.5) with Adam Topaz, machine `2e698309` (i9-14900K, 16 of 32 CPUs, 32 GB cap)
 - **Outcome:** failure (the first standard sweep flagged `noop`; the rerun, `success`, cannot override it)
-- **Branch / PR:** research/incr-header-log (code: research/incr-header-wip, https://github.com/adamtopaz/blake/tree/research/incr-header-wip) — PR TBD
+- **Branch / PR:** research/incr-header-log (code: research/incr-header-wip, https://github.com/adamtopaz/blake/tree/research/incr-header-wip) — https://github.com/adamtopaz/blake/pull/12
 - **Result files:** research/results/20261031T080508Z-2e698309-1702b24.json (standard sweep), research/results/20261031T085453Z-2e698309-1702b24.json (rerun, `--repeat 5 --repeat-fast 20`)
 
 ## Hypothesis
