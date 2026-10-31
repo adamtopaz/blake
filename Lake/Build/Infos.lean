@@ -91,6 +91,12 @@ public structure ModulePreSetup where
   plugins : Array Dynlib
   dynlibs : Array Dynlib
   leanOptions : LeanOptions
+  /--
+  Modified for Blake (2026-10-31): the hash of the module's trace up to, but not
+  including, its source file (imports, libraries, platform, and the Lean toolchain).
+  Keys the module's header snapshot (see `Module.buildLean`).
+  -/
+  headerHash : Hash := .nil
 
 /--
 The computed dynamic configuration of a module.

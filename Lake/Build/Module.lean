@@ -14,6 +14,7 @@ import Lake.Util.Proc
 import Lake.Build.Job.Register
 import Lake.Build.Common
 import Lake.Build.Target
+import Lake.Config.InstallPath
 import Init.Omega
 
 /-! # Module Build Definitions -/
@@ -617,6 +618,8 @@ def Module.recFetchPreSetup (mod : Module) : FetchM (Job ModulePreSetup) := ensu
     let extra := (← getLeanOptOverrides).find? mod.pkg.baseName |>.getD {}
     let leanOptions := mod.leanOptions ++ extra
     addLeanTrace
+    -- Modified for Blake (2026-10-31): see `ModulePreSetup.headerHash`.
+    let headerHash := (← getTrace).hash
     addTrace input.trace
     addTrace <| traceOptions leanOptions "options"
     addPureTrace input.header.isModule "isModule"
@@ -630,7 +633,7 @@ def Module.recFetchPreSetup (mod : Module) : FetchM (Job ModulePreSetup) := ensu
       isModule := input.header.isModule
       directImports := input.imports
       directImportArts := info.directArts
-      dynlibs, plugins, leanOptions
+      dynlibs, plugins, leanOptions, headerHash
     }
 where
   traceOptions (opts : LeanOptions) (caption := "opts") : BuildTrace :=
@@ -990,6 +993,62 @@ def Module.recBuildLtar (self : Module) : FetchM (Job FilePath) := do
 public def Module.ltarFacetConfig : ModuleFacetConfig ltarFacet :=
   mkFacetJobConfig recBuildLtar
 
+/--
+Blake (2026-10-31): Lean's header snapshot for a module that is being edited.
+
+When only a module's source changes between builds, `lean` still imports the same
+modules every time. `lean --incr-header-save=<file>` saves the environment right after
+the header (the imports), and `--incr-load=<file>` resumes from it when the header has
+not changed. The files sit next to the module's C file: `<mod>.blake-header` (the
+snapshot), `<mod>.blake-header.deps` (its list of imported files, written by `lean`),
+and `<mod>.blake-header.key`, whose first line is `saved` (the snapshot exists) or
+`edited` (the module was edited once with these inputs), followed by the key: every
+input of the compile except the source (`ModulePreSetup.headerHash`, `lean`, the
+search path, the arguments, and the module setup with the paths of all imports).
+
+A module counts as edited if its source is newer than its trace file. Saving costs
+time and disk, so it is done on the second edit in a row with the same key, and the
+snapshot is loaded from the third on. Any other rebuild discards it. Modules that
+load plugins or dynamic libraries never use snapshots (a loaded header does not load
+them again), nor does a `lean` other than the one Blake was built with.
+
+Returns `(incrLoad?, incrHeaderSave?, action to run after a successful compile)`.
+-/
+private def Module.headerSnapshot
+  (mod : Module) (presetup : ModulePreSetup) (setup : ModuleSetup)
+  (args : Array String) (leanPath : System.SearchPath) (lean : FilePath)
+: JobM (Option FilePath × Option FilePath × IO Unit) := do
+  let snap := mod.irPath "blake-header"
+  let deps := snap.addExtension "deps"
+  let keyFile := mod.irPath "blake-header.key"
+  let edited ← show IO Bool from
+    (do return (← getMTime mod.traceFile) < presetup.srcMTime) <|> pure false
+  let record? ← show IO (Option String) from
+    (some <$> IO.FS.readFile keyFile) <|> pure none
+  if !edited && record?.isNone then
+    return (none, none, pure ())
+  let discard : IO Unit := do
+    removeFileIfExists keyFile; removeFileIfExists snap; removeFileIfExists deps
+  let loadsCode := !setup.dynlibs.isEmpty || !setup.plugins.isEmpty ||
+    args.any fun a => a.startsWith "--plugin" || a.startsWith "--load-dynlib" || a.startsWith "-p"
+  let sameLean ← match lean.parent >>= (·.parent) with
+    | some sysroot => initOleanHasLeanGithash sysroot
+    | none => pure false
+  if loadsCode || !sameLean then
+    discard
+    return (none, none, pure ())
+  let key := s!"{presetup.headerHash}\n{lean}\n{leanPath}\n{args}\n{(toJson setup).compress}\n"
+  if record? == some ("saved\n" ++ key) && (← snap.pathExists) && (← deps.pathExists) then
+    return (some snap, none, pure ())
+  if edited && record? == some ("edited\n" ++ key) then
+    discard
+    return (none, some snap, IO.FS.writeFile keyFile ("saved\n" ++ key))
+  if record?.isSome then
+    discard
+  if edited then
+    return (none, none, IO.FS.writeFile keyFile ("edited\n" ++ key))
+  return (none, none, pure ())
+
 def Module.buildLean
   (mod : Module) (presetup : ModulePreSetup)
 : JobM ModuleOutputArtifacts := do buildAction (← getTrace) mod.traceFile do
@@ -997,9 +1056,21 @@ def Module.buildLean
   let relSrcFile := relPathFrom mod.pkg.dir presetup.srcFile
   let setup ← mkModuleSetup mod presetup
   let arts := mod.mkArtifacts presetup.srcFile presetup.isModule
+  let leanPath ← getLeanPath
+  let lean ← getLean
+  -- Modified for Blake (2026-10-31): header snapshots (see `Module.headerSnapshot`).
+  let (incrLoad?, incrHeaderSave?, recordSnapshot) ←
+    mod.headerSnapshot presetup setup args leanPath lean
   mod.clearOutputArtifacts
-  compileLeanModule presetup.srcFile relSrcFile setup mod.setupFile arts args
-    (← getLeanPath) (← getLean) (← getLeanir)
+  try
+    compileLeanModule presetup.srcFile relSrcFile setup mod.setupFile arts args
+      leanPath lean (← getLeanir) incrLoad? incrHeaderSave?
+  catch e =>
+    if let some snap := incrHeaderSave? then
+      removeFileIfExists snap
+      removeFileIfExists (snap.addExtension "deps")
+    throw e
+  recordSnapshot
   mod.clearOutputHashes
   mod.computeArtifacts setup.isModule
 
