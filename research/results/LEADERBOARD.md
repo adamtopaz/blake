@@ -9,12 +9,15 @@ and hub. Runs on different machines are only comparable through these ratios.
 
 | machine | cpus | commit | label | date | primary | noop | leaf | swarm | hub | cold |
 |---|---|---|---|---|---|---|---|---|---|---|
-| 2e698309 | 16 | a53246d | job-queue-list | 2026-10-30 | **1.296x** | 2.059x | 1.320x | 1.029x | 1.010x | 1.002x |
+| 2e698309 | 16 | f68ec1d | fork-lean | 2026-10-31 | **1.324x** | 2.030x | 1.391x | 1.067x | 1.020x | 1.037x |
 
 ## All committed runs (newest first)
 
 | date (UTC) | machine | cpus | branch | commit | label | verdict | vs main primary | vs lake primary | correct | standard | duration | file |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 2026-10-31 02:07 | 2e698309 | 16 | research/fork-lean | f68ec1d | fork-lean | success | 1.029x | 1.324x | yes | yes | 31 min | `20261031T020717Z-2e698309-f68ec1d.json` |
+| 2026-10-31 01:15 | 2e698309 | 16 | research/fork-lean | ad55938 | fork-lean | success | 1.016x | 1.323x | yes | yes | 31 min | `20261031T011544Z-2e698309-ad55938.json` |
+| 2026-10-31 00:33 | 2e698309 | 16 | research/fork-lean | 9a95eef | fork-lean | success | 1.009x | 1.290x | yes | yes | 31 min | `20261031T003346Z-2e698309-9a95eef.json` |
 | 2026-10-30 22:36 | 2e698309 | 16 | research/adaptive-lean-threads | a10ba3d | adaptive-lean-threads | neutral | 1.000x | 1.274x | yes | yes | 33 min | `20261030T223613Z-2e698309-a10ba3d.json` |
 | 2026-10-30 20:36 | 2e698309 | 16 | research/job-queue-list | a53246d | job-queue-list | success | 1.018x | 1.281x | yes | yes | 50 min | `20261030T203613Z-2e698309-a53246d.json` |
 | 2026-10-30 19:44 | 2e698309 | 16 | research/job-queue-list | a53246d | job-queue-list | success | 1.011x | 1.296x | yes | yes | 31 min | `20261030T194423Z-2e698309-a53246d.json` |
@@ -27,23 +30,23 @@ and hub. Runs on different machines are only comparable through these ratios.
 
 ## Per-scenario detail of the newest standard run per machine
 
-### 2e698309: Intel(R) Core(TM) i9-14900K (16 cpus, 32 GB cap), 2026-10-30, commit a10ba3d
+### 2e698309: Intel(R) Core(TM) i9-14900K (16 cpus, 32 GB cap), 2026-10-31, commit f68ec1d
 
 | corpus | scenario | lake | main | candidate |
 |---|---|---|---|---|
-| medium-deep | cold | 43.20 s | 42.64 s | 42.01 s |
-| medium-deep | noop | 0.17 s | 0.09 s | 0.09 s |
-| medium-deep | leaf | 0.55 s | 0.50 s | 0.47 s |
-| medium-deep | swarm | 17.97 s | 18.02 s | 18.00 s |
-| medium-deep | hub | 43.09 s | 42.68 s | 42.75 s |
-| medium-layered | cold | 46.35 s | 45.87 s | 45.37 s |
-| medium-layered | noop | 0.16 s | 0.09 s | 0.09 s |
-| medium-layered | leaf | 0.56 s | 0.46 s | 0.45 s |
-| medium-layered | swarm | 16.37 s | 16.14 s | 16.04 s |
-| medium-layered | hub | 41.80 s | 41.02 s | 40.96 s |
-| medium-wide | cold | 41.53 s | 41.20 s | 42.25 s |
-| medium-wide | noop | 0.18 s | 0.08 s | 0.09 s |
-| medium-wide | leaf | 0.38 s | 0.24 s | 0.24 s |
-| medium-wide | swarm | 1.29 s | 1.21 s | 1.19 s |
-| medium-wide | hub | 42.69 s | 42.30 s | 42.76 s |
+| medium-deep | cold | 43.01 s | 41.65 s | 41.12 s |
+| medium-deep | noop | 0.18 s | 0.09 s | 0.08 s |
+| medium-deep | leaf | 0.57 s | 0.44 s | 0.42 s |
+| medium-deep | swarm | 16.17 s | 15.98 s | 15.26 s |
+| medium-deep | hub | 39.59 s | 40.01 s | 38.26 s |
+| medium-layered | cold | 43.40 s | 45.38 s | 41.87 s |
+| medium-layered | noop | 0.17 s | 0.09 s | 0.09 s |
+| medium-layered | leaf | 0.57 s | 0.46 s | 0.44 s |
+| medium-layered | swarm | 16.06 s | 15.93 s | 15.16 s |
+| medium-layered | hub | 38.69 s | 38.56 s | 38.12 s |
+| medium-wide | cold | 41.86 s | 40.09 s | 40.64 s |
+| medium-wide | noop | 0.18 s | 0.09 s | 0.09 s |
+| medium-wide | leaf | 0.37 s | 0.25 s | 0.24 s |
+| medium-wide | swarm | 1.28 s | 1.15 s | 1.18 s |
+| medium-wide | hub | 39.86 s | 40.38 s | 39.50 s |
 
