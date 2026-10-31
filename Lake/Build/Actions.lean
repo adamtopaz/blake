@@ -100,12 +100,14 @@ public def prestartZygote (lean : FilePath) : BaseIO Unit := do
 public def stopZygotes : BaseIO Unit := do
   let zs ← zygoteAll.modifyGet (·, #[])
   zygoteIdle.set []
+  -- Ask every zygote to stop before reaping any, so that their exits overlap.
   for z in zs do
-    let stop : IO Unit := do
+    let ask : IO Unit := do
       z.stdin.putStr "0\x00"
       z.stdin.flush
-      discard z.wait
-    stop.catchExceptions fun _ => z.kill.catchExceptions fun _ => pure ()
+    ask.catchExceptions fun _ => z.kill.catchExceptions fun _ => pure ()
+  for z in zs do
+    (discard z.wait : IO Unit).catchExceptions fun _ => pure ()
 
 public def compileLeanModule
   (leanFile relLeanFile : FilePath)
