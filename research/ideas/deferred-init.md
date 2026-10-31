@@ -60,15 +60,16 @@ artifacts cannot change.
 ## Measured gains
 
 Standard sweep on machine `2e698309` (i9-14900K, 16 CPUs, 32 GB cap), result
-`research/results/20261031T145513Z-2e698309-15f4807.json`:
+`research/results/20261031T153330Z-2e698309-782fae0.json`:
 
 ```
-speedup of candidate vs main: cold=1.014x, noop=1.048x, leaf=1.036x, swarm=1.020x, hub=1.001x, primary_geomean=1.026x
+speedup of candidate vs main: cold=0.997x, noop=1.143x, leaf=1.014x, swarm=1.017x, hub=0.996x, primary_geomean=1.041x
 ```
 
-`noop` improved on `layered` and `wide` (1.111x each); on `deep` it was within the
-noise of the harness's ~70-105 ms `noop` runs (1.001x). Direct `noop` on
-`medium-deep`, 30 runs each: 73.2 ms vs 85.1 ms.
+`noop` improved on `layered` (1.126x) and `wide` (1.177x); on `deep` it was 1.038x,
+within the noise of the harness's ~70-105 ms `noop` runs. An earlier sweep of the
+same code (`20261031T145513Z-2e698309-15f4807.json`) gave 1.111x, 1.111x and 1.001x.
+Direct `noop` on `medium-deep`, 30 runs each: 73.2 ms vs 85.1 ms.
 
 ## Caveats and follow-ups
 

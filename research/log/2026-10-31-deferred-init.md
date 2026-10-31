@@ -4,7 +4,7 @@
 - **Author:** Claude (Opus 5.5) with Adam Topaz, machine `2e698309` (i9-14900K, 16 of 32 CPUs, 32 GB cap)
 - **Outcome:** success
 - **Branch / PR:** research/deferred-init — https://github.com/adamtopaz/blake/pull/15
-- **Result files:** research/results/20261031T145513Z-2e698309-15f4807.json (run label `lazy-init`, the working name)
+- **Result files:** research/results/20261031T153330Z-2e698309-782fae0.json (decisive: the PR's code); research/results/20261031T145513Z-2e698309-15f4807.json (before the CI fix below; run label `lazy-init`, the working name)
 
 ## Hypothesis
 
@@ -90,8 +90,41 @@ Checked by hand:
 
 ## Measurements
 
-Standard sweep on `15f4807`: 16 CPUs (affinity), 32 GB (systemd MemoryMax),
-`LEAN_NUM_THREADS=16`, 10 pairs for fast scenarios and 3 for the rest; one run.
+Two standard sweeps: 16 CPUs (affinity), 32 GB (systemd MemoryMax),
+`LEAN_NUM_THREADS=16`, 10 pairs for fast scenarios and 3 for the rest.
+
+The first CI run failed to build `blakeInit`. I had compiled it with
+`getLeanCc` and only `-I`, and CI's bundled clang then cannot find `stddef.h`. It is
+now compiled with `buildLeanO`, exactly like Lean's generated C (commit
+`782fae0`). That changed `lakefile.lean`, so the sweep was rerun on the PR's code.
+That run decides:
+
+```
+speedup of main vs lake: cold=1.086x, noop=1.957x, leaf=1.764x, swarm=1.218x, hub=1.080x, primary_geomean=1.460x
+speedup of candidate vs lake: cold=1.082x, noop=2.237x, leaf=1.790x, swarm=1.238x, hub=1.076x, primary_geomean=1.520x
+speedup of candidate vs main: cold=0.997x, noop=1.143x, leaf=1.014x, swarm=1.017x, hub=0.996x, primary_geomean=1.041x
+correctness of main: identical artifacts to lake, all builds ok, break check ok
+correctness of candidate: identical artifacts to lake, all builds ok, break check ok
+verdict medium-deep/cold: same (paired speedup 0.997x over 1 runs, threshold 7%; medians main 33.43s, candidate 33.55s)
+verdict medium-deep/noop: same (paired speedup 1.038x over 10 runs, threshold 7%; medians main 0.09s, candidate 0.08s)
+verdict medium-deep/leaf: same (paired speedup 1.001x over 10 runs, threshold 7%; medians main 0.34s, candidate 0.35s)
+verdict medium-deep/swarm: same (paired speedup 1.009x over 3 runs, threshold 3%; medians main 14.40s, candidate 14.27s)
+verdict medium-deep/hub: same (paired speedup 0.994x over 3 runs, threshold 3%; medians main 32.46s, candidate 32.67s)
+verdict medium-layered/cold: same (paired speedup 0.993x over 1 runs, threshold 7%; medians main 34.87s, candidate 35.12s)
+verdict medium-layered/noop: improved (paired speedup 1.126x over 10 runs, threshold 7%; medians main 0.10s, candidate 0.08s)
+verdict medium-layered/leaf: same (paired speedup 1.014x over 10 runs, threshold 7%; medians main 0.35s, candidate 0.35s)
+verdict medium-layered/swarm: same (paired speedup 0.984x over 3 runs, threshold 3%; medians main 13.29s, candidate 12.86s)
+verdict medium-layered/hub: same (paired speedup 1.008x over 3 runs, threshold 3%; medians main 31.33s, candidate 31.06s)
+verdict medium-wide/cold: same (paired speedup 1.001x over 1 runs, threshold 7%; medians main 30.96s, candidate 30.93s)
+verdict medium-wide/noop: improved (paired speedup 1.177x over 10 runs, threshold 7%; medians main 0.09s, candidate 0.08s)
+verdict medium-wide/leaf: same (paired speedup 1.058x over 10 runs, threshold 7%; medians main 0.19s, candidate 0.18s)
+verdict medium-wide/swarm: same (paired speedup 1.004x over 10 runs, threshold 7%; medians main 0.94s, candidate 0.93s)
+verdict medium-wide/hub: same (paired speedup 0.987x over 3 runs, threshold 3%; medians main 30.96s, candidate 31.37s)
+verdict: success
+```
+
+The first sweep, on `15f4807` (the same code, with `blake_init.c` compiled by the
+other command), also had verdict `success`:
 
 ```
 speedup of main vs lake: cold=1.081x, noop=2.068x, leaf=1.698x, swarm=1.168x, hub=1.087x, primary_geomean=1.453x
@@ -117,8 +150,8 @@ verdict medium-wide/hub: same (paired speedup 0.994x over 3 runs, threshold 3%; 
 verdict: success
 ```
 
-The `noop` runs themselves (ms) show how noisy the harness's `noop` is next to a
-~12 ms effect. The two tools are interleaved and the speedup is the median of the
+The `noop` runs of that first sweep (ms) show how noisy the harness's `noop` is next
+to a ~12 ms effect. The two tools are interleaved and the speedup is the median of the
 paired ratios:
 
 ```
@@ -133,8 +166,10 @@ ok, break check ok`.
 ## Conclusion
 
 Initializing only what a TOML `lake build` uses saves ~12 ms per invocation (85 ms
-becomes 73 ms on a direct `noop`). That is a tenth of `noop`, improved on `layered`
-and `wide` (1.111x each), lost in the noise on `deep`, and 2-4% elsewhere. Nothing
+becomes 73 ms on a direct `noop`). That is a tenth or more of `noop`: improved on
+`layered` and `wide` in both sweeps (1.126x and 1.177x in the decisive one; 1.111x
+each in the first), and 1.001-1.038x on `deep`, where the harness's `noop` is
+noisiest. `leaf` gains 1-6%. Nothing
 else changes: `lean` runs as before, and commands other than `build`, and
 `lakefile.lean` workspaces, initialize everything as stock Lake does.
 
