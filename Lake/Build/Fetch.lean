@@ -66,10 +66,15 @@ public abbrev RecBuildM := RecBuildT LogIO
   (stack : CallStack BuildKey) (store : BuildStore) (build : RecBuildT m α)
 : BuildT m (α × BuildStore) := build none stack |>.run store
 
-/-- Run a recursive build in a fresh build store. -/
+/--
+Run a recursive build in a fresh build store.
+Modified for Blake (2026-10-31): the store has hash buckets (see `BuildStore`).
+-/
 @[inline] public def RecBuildT.run'
   [Monad m] [MonadLiftT (ST IO.RealWorld) m] (build : RecBuildT m α)
-: BuildT m α := (·.1) <$> build.run {} {}
+: BuildT m α := do
+  let store ← (liftM (BuildStore.new) : m _)
+  (·.1) <$> build.run {} store
 
 /-- A build function for any element of the Lake build index. -/
 public abbrev IndexBuildFn (m : Type → Type v) :=
