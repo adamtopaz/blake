@@ -203,6 +203,8 @@ public def compileLeanModule
   (leanPath : SearchPath := [])
   (lean : FilePath := "lean")
   (leanir : FilePath := "leanir")
+  (incrLoad? : Option FilePath := none)
+  (incrHeaderSave? : Option FilePath := none)
 : LogIO Unit := do
   let mut args := leanArgs.push leanFile.toString
   if let some oleanFile := arts.olean? then
@@ -225,15 +227,15 @@ public def compileLeanModule
   args := args ++ #["--setup", setupFile.toString]
   args := args.push "--json"
   withLogErrorPos do
-  let spawnArgs : IO.Process.SpawnArgs := {
-    args
-    cmd := lean.toString
-    env := #[
-      ("LEAN_PATH", leanPath.toString)
-    ]
-  }
   -- Blake: through `blake-zygote` when possible (see `zygoteFor?`).
-  let out ← id do
+  let run (args : Array String) : LogIO IO.Process.Output := do
+    let spawnArgs : IO.Process.SpawnArgs := {
+      args
+      cmd := lean.toString
+      env := #[
+        ("LEAN_PATH", leanPath.toString)
+      ]
+    }
     if let some zygote ← zygoteFor? lean then
       if let some sysroot := lean.parent >>= (·.parent) then
         logVerbose (mkCmdLog spawnArgs)
@@ -244,6 +246,19 @@ public def compileLeanModule
           return out
         return ← rawProc spawnArgs (quiet := true)
     rawProc spawnArgs
+  -- Modified for Blake (2026-10-31): Lean's header snapshots, for modules being edited
+  -- (see `Module.headerSnapshot`).
+  let incrArgs :=
+    (incrLoad?.map (s!"--incr-load={·}")).toArray ++
+    (incrHeaderSave?.map (s!"--incr-header-save={·}")).toArray
+  let mut out ← run (args ++ incrArgs)
+  if let some snap := incrLoad? then
+    -- `lean` reports errors in the source as JSON on stdout and exits with code 1.
+    -- Anything else means that the snapshot could not be used: compile without it.
+    if out.exitCode ≠ 0 && (out.exitCode ≠ 1 || !out.stderr.isEmpty) then
+      removeFileIfExists snap
+      removeFileIfExists (snap.addExtension "deps")
+      out ← run args
   let outLogPos ← getLogPos
   unless out.stdout.isEmpty do
     let txt ← out.stdout.split '\n' |>.foldM (init := "") fun (txt : String) ln => do
