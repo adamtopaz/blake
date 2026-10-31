@@ -14,6 +14,7 @@ import Lake.Build.Target.Fetch
 import Lake.Build.Infos
 import Lake.Util.Proc
 import Lake.Build.Actions
+import Std.Data.HashSet
 
 /-! # Library Facet Builds
 Build function definitions for a library's builtin facets.
@@ -84,12 +85,39 @@ def LeanLib.recBuildLean
   -- a compile is likely, so start a `blake-zygote` now (in the background) for its
   -- initialization to overlap with the trace checks (see `Lake.prestartZygote`).
   let lean ← getLean
+  -- Modified for Blake (2026-10-31, `spec-compile`): and compile edited modules whose
+  -- imports are not edited speculatively (see `Lake.speculateCompile`).
+  let leanPath ← getLeanPath
   discard <| (IO.asTask (prio := .dedicated) do
-    if (← mods.anyM fun mod => sourceNewerThanTrace mod) then
-      prestartZygote lean : BaseIO _)
+    let edited ← mods.filterM fun mod => sourceNewerThanTrace mod
+    unless edited.isEmpty do
+      prestartZygote lean
+      let names : Std.HashSet String := edited.foldl (·.insert ·.name.toString) {}
+      for mod in edited do
+        if let some incrLoad? ← headerSnapshotLoad? mod then
+          speculateCompile lean leanPath mod.leanFile mod.setupFile mod.oleanFile mod.ileanFile
+            mod.cFile (mod.weakLeanArgs ++ mod.leanArgs) incrLoad? names : BaseIO _)
   mods.foldlM (init := Job.nil) fun job mod => do
     return job.mix <| ← mod.leanArts.fetch
 where
+  /--
+  The `--incr-load` argument that `Module.headerSnapshot` will likely choose for an
+  edited module: `some none` for none, `some (some snap)` for a saved snapshot, and
+  `none` when it will likely save one (then there is no point in speculating).
+  -/
+  headerSnapshotLoad? (mod : Module) : BaseIO (Option (Option FilePath)) := do
+    let snap := mod.irPath "blake-header"
+    match (← (IO.FS.readFile (snap.addExtension "key")).toBaseIO) with
+    | .ok s =>
+      if s.startsWith "saved\n" then
+        if (← snap.pathExists) && (← (snap.addExtension "deps").pathExists) then
+          return some (some snap)
+        return some none
+      else if s.startsWith "edited\n" then
+        return none
+      else
+        return some none
+    | .error _ => return some none
   /-- Whether `mod`'s source was modified after its trace was written. -/
   sourceNewerThanTrace (mod : Module) : BaseIO Bool := do
     let .ok trace ← mod.traceFile.metadata.toBaseIO | return false

@@ -13,6 +13,7 @@ import Lake.Util.IO
 import Lake.Util.Url
 import Lake.Config.InstallPath
 import Std.Data.HashMap
+import Std.Data.HashSet
 import Std.Sync.Mutex
 import Init.Data.String.Legacy
 import Init.Data.String.Search
@@ -230,6 +231,114 @@ private def startHeaderSave
       removeFileIfExists (save.snapshot.addExtension "deps")
   headerSavesRef.modify (·.push task)
 
+/-
+Modified for Blake (2026-10-31, `spec-compile`): a module whose source was edited is
+compiled speculatively as soon as the library's modules are known
+(`LeanLib.recBuildLean`), before Lake has checked its imports, with the setup file of
+its previous compile and its outputs written aside (`<file>.spec`). When Lake then
+compiles it (`compileLeanModule`), it adopts that compile's outputs and messages only
+if it would run the very same command with the very same setup file, and neither the
+source nor any imported artifact listed in the setup has changed since the
+speculation started (their modification times); otherwise it compiles as usual.
+-/
+
+private structure Speculation where
+  /-- The arguments of the compile it stands for (the real output and setup paths). -/
+  args : Array String
+  /-- The setup file contents it ran with. -/
+  setup : String
+  leanPath : String
+  srcFile : FilePath
+  srcMTime : IO.FS.SystemTime
+  /-- The imported artifacts named by the setup, with their modification times. -/
+  inputs : Array (FilePath × IO.FS.SystemTime)
+  /-- Its outputs: (where it wrote them, where they belong). -/
+  outputs : Array (FilePath × FilePath)
+  /-- Files to delete once it is no longer needed. -/
+  scratch : Array FilePath
+  task : Task (Except IO.Error (Option IO.Process.Output))
+
+/-- Speculative compiles not yet claimed, by source file. -/
+private builtin_initialize speculationsRef : IO.Ref (Std.HashMap String Speculation) ← IO.mkRef {}
+
+/-- Speculative compiles claimed or discarded, to clean up at the end of the build. -/
+private builtin_initialize spentSpeculationsRef : IO.Ref (Array Speculation) ← IO.mkRef #[]
+
+private partial def jsonStrings (j : Lean.Json) (acc : Array String) : Array String :=
+  match j with
+  | .str s => acc.push s
+  | .arr a => a.foldl (fun acc j => jsonStrings j acc) acc
+  | .obj o => o.foldl (fun acc _ j => jsonStrings j acc) acc
+  | _ => acc
+
+/--
+Starts a speculative compile of a non-`module` file with outputs `olean`, `ilean` and
+`cFile`, from its previous setup file, unless one of its imports is in `edited` (module
+names) or the setup cannot be used.
+-/
+public def speculateCompile
+  (lean : FilePath) (leanPath : SearchPath) (leanFile setupFile olean ilean cFile : FilePath)
+  (leanArgs : Array String) (incrLoad? : Option FilePath) (edited : Std.HashSet String)
+: BaseIO Unit := do
+  let some zygote ← zygoteFor? lean | return
+  let some sysroot := lean.parent >>= (·.parent) | return
+  let .ok setup ← (IO.FS.readFile setupFile).toBaseIO | return
+  let .ok json := Lean.Json.parse setup | return
+  let .ok false := json.getObjValAs? Bool "isModule" | return
+  let .ok (.obj imports) := json.getObjVal? "importArts" | return
+  if imports.any fun name _ => edited.contains name then return
+  let .ok srcMd ← leanFile.metadata.toBaseIO | return
+  let mut inputs := #[]
+  for f in jsonStrings (.obj imports) #[] do
+    let .ok md ← (FilePath.mk f).metadata.toBaseIO | return
+    inputs := inputs.push (FilePath.mk f, md.modified)
+  let tmp (f : FilePath) := f.addExtension "spec"
+  let specSetup := tmp setupFile
+  let .ok _ ← (IO.FS.writeFile specSetup setup).toBaseIO | return
+  let incrArgs := (incrLoad?.map (s!"--incr-load={·}")).toArray
+  let args := leanArgs ++ #[leanFile.toString, "-o", olean.toString, "-i", ilean.toString,
+    "-c", cFile.toString, "--setup", setupFile.toString, "--json"] ++ incrArgs
+  let specArgs := leanArgs ++ #[leanFile.toString, "-o", (tmp olean).toString,
+    "-i", (tmp ilean).toString, "-c", (tmp cFile).toString, "--setup", specSetup.toString,
+    "--json"] ++ incrArgs
+  let task ← IO.asTask (prio := .dedicated) <|
+    runLeanZygote zygote specArgs (leanPath ++ [sysroot / "lib" / "lean"]).toString
+  speculationsRef.modify (·.insert leanFile.toString {
+    args, setup, leanPath := leanPath.toString, srcFile := leanFile, srcMTime := srcMd.modified,
+    inputs, task
+    outputs := #[(tmp olean, olean), (tmp ilean, ilean), (tmp cFile, cFile)]
+    scratch := #[tmp olean, tmp ilean, tmp cFile, specSetup]})
+
+/-- Whether a speculative compile stands for a compile with these inputs. -/
+private def Speculation.matches
+  (s : Speculation) (args : Array String) (setup leanPath : String)
+: BaseIO Bool := do
+  if s.args != args || s.setup != setup || s.leanPath != leanPath then
+    return false
+  let .ok md ← s.srcFile.metadata.toBaseIO | return false
+  unless md.modified == s.srcMTime do return false
+  for (f, t) in s.inputs do
+    let .ok md ← f.metadata.toBaseIO | return false
+    unless md.modified == t do return false
+  return true
+
+/--
+The output of a speculative compile of `leanFile` that stands for this compile, with
+its outputs moved into place, if there is one.
+-/
+private def claimSpeculation
+  (leanFile : FilePath) (args : Array String) (setup leanPath : String)
+: BaseIO (Option IO.Process.Output) := do
+  let some s ← speculationsRef.modifyGet fun m => (m.get? leanFile.toString, m.erase leanFile.toString)
+    | return none
+  spentSpeculationsRef.modify (·.push s)
+  unless (← s.matches args setup leanPath) do return none
+  let .ok (some out) ← IO.wait s.task | return none
+  for (tmp, real) in s.outputs do
+    if (← tmp.pathExists) then
+      let .ok _ ← (IO.FS.rename tmp real).toBaseIO | return none
+  return some out
+
 /--
 Stop the build's `blake-zygote` (at the end of a build; it may not outlive Lake),
 after waiting for the header saves still running.
@@ -237,6 +346,13 @@ after waiting for the header saves still running.
 public def stopZygotes : BaseIO Unit := do
   for t in ← headerSavesRef.modifyGet (·, #[]) do
     discard <| IO.wait t
+  -- Blake (`spec-compile`): wait for speculative compiles and remove their leftovers.
+  let specs := (← speculationsRef.modifyGet fun m => (m.toArray.map (·.2), {})) ++
+    (← spentSpeculationsRef.modifyGet (·, #[]))
+  for sp in specs do
+    discard <| IO.wait sp.task
+    for f in sp.scratch do
+      discard <| (removeFileIfExists f).toBaseIO
   zygoteLock.lock
   let z? ← zygoteRef.modifyGet (·, none)
   zygoteLock.unlock
@@ -280,7 +396,8 @@ public def compileLeanModule
     createParentDirs bcFile
     args := args ++ #["-b", bcFile.toString]
   createParentDirs setupFile
-  IO.FS.writeFile setupFile (toJson setup).pretty
+  let setupJson := (toJson setup).pretty
+  IO.FS.writeFile setupFile setupJson
   args := args ++ #["--setup", setupFile.toString]
   args := args.push "--json"
   withLogErrorPos do
@@ -308,7 +425,14 @@ public def compileLeanModule
   if let some save := headerSave? then
     startHeaderSave save lean leanArgs setupFile leanPath
   let incrArgs := (incrLoad?.map (s!"--incr-load={·}")).toArray
-  let mut out ← run (args ++ incrArgs)
+  -- Blake (`spec-compile`): a speculative compile of this very command, if any.
+  let spec? ← if headerSave?.isSome then pure none else
+    claimSpeculation leanFile (args ++ incrArgs) setupJson leanPath.toString
+  let mut out ← match spec? with
+    | some out => do
+      logVerbose <| mkCmdLog {args := args ++ incrArgs, cmd := lean.toString, env := #[("LEAN_PATH", leanPath.toString)]}
+      pure out
+    | none => run (args ++ incrArgs)
   if let some snap := incrLoad? then
     -- `lean` reports errors in the source as JSON on stdout and exits with code 1.
     -- Anything else means that the snapshot could not be used: compile without it.
