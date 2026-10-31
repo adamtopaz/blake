@@ -2,7 +2,7 @@
 
 - **Merged:** YYYY-MM-DD, PR <URL> (filled in by the maintainer on merge)
 - **Log entry:** ../log/2026-10-30-fork-lean.md
-- **Scenarios improved:** swarm (`deep`), hub (`wide`); leaf, hub, and cold slightly elsewhere
+- **Scenarios improved:** swarm (`deep`, `layered`), hub (`deep`, `wide`); leaf and cold slightly
 
 ## Problem
 
@@ -59,14 +59,19 @@ start); `Lake/Config/InstallPath.lean` (`initOleanHasLeanGithash` made public).
 
 ## Measured gains
 
-Two standard sweeps on machine `2e698309` (i9-14900K, 16 CPUs, 32 GB cap), medium
-corpora; results `research/results/20261031T003346Z-2e698309-9a95eef.json` and
-`research/results/20261031T011544Z-2e698309-ad55938.json` (the merged code):
+Three standard sweeps on machine `2e698309` (i9-14900K, 16 CPUs, 32 GB cap), medium
+corpora; results `research/results/20261031T003346Z-2e698309-9a95eef.json`,
+`research/results/20261031T011544Z-2e698309-ad55938.json`, and
+`research/results/20261031T020717Z-2e698309-f68ec1d.json` (the merged code):
 
 ```
 speedup of candidate vs main: cold=1.004x, noop=0.991x, leaf=1.038x, swarm=0.995x, hub=1.014x, primary_geomean=1.009x
 speedup of candidate vs main: cold=1.022x, noop=0.980x, leaf=1.043x, swarm=1.010x, hub=1.032x, primary_geomean=1.016x
+speedup of candidate vs main: cold=1.027x, noop=1.030x, leaf=1.038x, swarm=1.023x, hub=1.026x, primary_geomean=1.029x
 ```
+
+In the last: `swarm` improved on `deep` (1.039x) and `layered` (1.051x), `hub` on
+`deep` (1.046x), and `cold` on `layered` (1.084x, one run).
 
 Improved: `swarm` on `medium-deep` (1.043x, first sweep) and `hub` on
 `medium-wide` (1.050x, second sweep). Consistently a little faster but under the
