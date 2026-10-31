@@ -27,6 +27,7 @@ import Lake.CLI.Init
 import Lake.CLI.Help
 import Lake.CLI.Build
 import LeanExport.Basic
+import Lake.Util.FullInit
 import Lake.CLI.Actions
 import Lake.CLI.Translate
 import Lake.CLI.Serve
@@ -1378,7 +1379,7 @@ protected def help : CliM PUnit := do
 
 end lake
 
-def lakeCli : (cmd : String) → CliM PUnit
+def lakeCliCore : (cmd : String) → CliM PUnit
 | "new"                 => lake.new
 | "init"                => lake.init
 | "build"               => lake.build
@@ -1417,6 +1418,11 @@ def lakeCli : (cmd : String) → CliM PUnit
     throw <| CliError.unexpectedPlus
   else
     throw <| CliError.unknownCommand cmd
+
+/-- Modified for Blake (2026-10-31): only `build` may run before Lean is fully initialized (see `fullInitialize`). -/
+def lakeCli (cmd : String) : CliM PUnit := do
+  unless cmd == "build" do fullInitialize
+  lakeCliCore cmd
 
 def lake : CliM PUnit := do
   match (← getArgs) with
