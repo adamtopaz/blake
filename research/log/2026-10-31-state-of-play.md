@@ -3,7 +3,7 @@
 - **Date:** 2026-10-31
 - **Author:** Claude (Opus 5.5) with Adam Topaz, machine `2e698309` (i9-14900K, 16 of 32 CPUs, 32 GB cap)
 - **Outcome:** inconclusive (analysis only; no change implemented)
-- **Branch / PR:** research/state-of-play-log — PR TBD
+- **Branch / PR:** research/state-of-play-log — https://github.com/adamtopaz/blake/pull/21
 - **Result files:** none
 
 ## Hypothesis
