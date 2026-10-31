@@ -23,11 +23,70 @@ open Lean (Name NameMap)
 /-- A monad equipped with a Lake build store. -/
 public abbrev MonadBuildStore (m) := MonadDStore BuildKey (Job <| BuildData ·) m
 
-/-- The type of the Lake build store. -/
-public  abbrev BuildStore :=
-  Std.DTreeMap BuildKey (Job <| BuildData ·) BuildKey.quickCmp
+/-- An entry of a bucket of a `BuildStore`. -/
+public structure BuildStore.Entry where
+  hash : UInt64
+  key : BuildKey
+  job : Job (BuildData key)
 
-@[inline] public def BuildStore.empty : BuildStore := Std.DTreeMap.empty
+/--
+The type of the Lake build store.
+
+Modified for Blake (2026-10-31, `bucket-store`): this used to be just `map`. The store
+is shared by the threads of a build, so it lives in a reference that job tasks capture,
+which marks it, and every map stored into it, as multi-threaded. Multi-threaded objects
+are never exclusive, so every insertion into the persistent map copied its whole path
+(~14 nodes for the ~10 jobs per module of a 1000-module library), marked the copies
+multi-threaded, and freed the old path with atomic reference counting, all on the
+build's critical path (the fetch thread) and while other threads waited for the
+reference. A store made by `BuildStore.new` (as every Lake build's is, see
+`RecBuildT.run'`) instead keeps its entries in `buckets`, a fixed array of references to
+lists, indexed by the key's hash: an insertion conses one cell onto one bucket.
+A store made without buckets (`{}`) behaves as before.
+-/
+public structure BuildStore where
+  map : Std.DTreeMap BuildKey (Job <| BuildData ·) BuildKey.quickCmp := {}
+  buckets : Array (IO.Ref (List BuildStore.Entry)) := #[]
+
+@[inline] public def BuildStore.empty : BuildStore := {}
+
+public instance : EmptyCollection BuildStore := ⟨BuildStore.empty⟩
+
+/-- A store with hash buckets (see `BuildStore`). -/
+public def BuildStore.new (numBuckets := 4096) : ST IO.RealWorld BuildStore := do
+  return {buckets := ← (Array.replicate numBuckets ()).mapM fun _ => ST.mkRef []}
+
+namespace BuildStore
+
+/-- Finds the job of `key` (whose hash is `h`) in a bucket. -/
+public def findEntry? (key : BuildKey) (h : UInt64) : List Entry → Option (Job (BuildData key))
+  | [] => none
+  | e :: es =>
+    if e.hash == h then
+      if heq : e.key = key then some (heq ▸ e.job) else findEntry? key h es
+    else findEntry? key h es
+
+end BuildStore
+
+public instance [MonadLiftT (ST IO.RealWorld) m] [Monad m] :
+  MonadDStore BuildKey (Job <| BuildData ·) (StateRefT' IO.RealWorld BuildStore m)
+where
+  fetch? key := do
+    let s ← get
+    if h : 0 < s.buckets.size then
+      let hash := hash key
+      let bucket := s.buckets[hash.toNat % s.buckets.size]'(Nat.mod_lt _ h)
+      return BuildStore.findEntry? key hash (← (bucket.get : ST IO.RealWorld _))
+    else
+      return s.map.get? key
+  store key job := do
+    let s ← get
+    if h : 0 < s.buckets.size then
+      let hash := hash key
+      let bucket := s.buckets[hash.toNat % s.buckets.size]'(Nat.mod_lt _ h)
+      (bucket.modify ({hash, key, job} :: ·) : ST IO.RealWorld _)
+    else
+      modify fun s => {s with map := s.map.insert key job}
 
 namespace BuildStore
 
@@ -50,7 +109,7 @@ public def collectModuleFacetArray
   (self : BuildStore) (facet : Name) [FamilyOut FacetOut facet α]
 : Array (Job α) := Id.run do
   let mut res : Array (Job α) := #[]
-  for ⟨k, v⟩ in self do
+  for ⟨k, v⟩ in self.map do
     if let some (_, job) := getModuleFacetJob? facet k v then
       res := res.push job
   return res
@@ -62,7 +121,7 @@ public def collectModuleFacetMap
   (self : BuildStore) (facet : Name) [FamilyOut FacetOut facet α]
 : NameMap (Job α) := Id.run do
   let mut res := Lean.mkNameMap (Job α)
-  for ⟨k, v⟩ in self do
+  for ⟨k, v⟩ in self.map do
     if let some (m, job) := getModuleFacetJob? facet k v then
       res := res.insert m job
   return res
@@ -83,7 +142,7 @@ public def collectPackageFacetArray
   (self : BuildStore) (facet : Name) [FamilyOut FacetOut facet α]
 : Array (Job α) := Id.run do
   let mut res : Array (Job α) := #[]
-  for ⟨k, v⟩ in self do
+  for ⟨k, v⟩ in self.map do
     if let some job := getPackageFacetJob? facet k v then
       res := res.push job
   return res
@@ -104,7 +163,7 @@ public def collectTargetFacetArray
   (self : BuildStore) (facet : Name) [FamilyOut FacetOut facet α]
 : Array (Job α) := Id.run do
   let mut res : Array (Job α) := #[]
-  for ⟨k, v⟩ in self do
+  for ⟨k, v⟩ in self.map do
     if let some job := getTargetFacetJob? facet k v then
       res := res.push job
   return res
