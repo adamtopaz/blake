@@ -11,7 +11,9 @@ paying for `exec`, dynamic linking, and Lean's initialization on every module.
 
 Protocol (binary, on stdin): a request is a decimal field count followed by that many
 fields, each terminated by a NUL byte: a request id, the stdout file, the stderr file,
-the value of `LEAN_PATH`, and then `argv` (starting with `argv[0]`). Requests may be
+the value of `LEAN_PATH`, a nice increment for the child (`critical-nice`, 2026-10-31:
+Blake gives modules with less work depending on them a lower priority), and then
+`argv` (starting with `argv[0]`). Requests may be
 sent while earlier ones are still running; each runs in its own child at once. When a
 child exits, the server writes `<id> <exit code>` as a line on stdout (128 + the signal
 number if it was killed by a signal). A count of 0, or end of input, makes the server
@@ -121,7 +123,9 @@ static void spawn(char ** fields, int count) {
     dup2(devnull, 0); dup2(out, 1); dup2(err, 2);
     close(devnull); close(out); close(err);
     setenv("LEAN_PATH", fields[3], 1);
-    int rc = child_main(count - 4, fields + 4);
+    int nice_inc = atoi(fields[4]);
+    if (nice_inc > 0 && nice(nice_inc) == -1) {} /* best effort; threads inherit it */
+    int rc = child_main(count - 5, fields + 5);
     fflush(NULL);
     _exit(rc);
   }
@@ -221,7 +225,7 @@ int main(void) {
         memmove(in_buf, in_buf + used, in_len - used);
         in_len -= used;
         if (count == 0) { accepting = 0; break; }
-        if (count >= 5) spawn(fields, count);
+        if (count >= 6) spawn(fields, count);
         for (int i = 0; i < count; i++) free(fields[i]);
         free(fields);
       }

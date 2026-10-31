@@ -133,12 +133,31 @@ private def getZygote (zygote : FilePath) : IO Zygote := do
   finally
     zygoteLock.unlock
 
+/-
+Modified for Blake (2026-10-31, `critical-nice`): each module's compile runs at a nice
+value derived from how much of its library depends on it (see
+`LeanLib.recCollectLocalModules`): modules on long chains of dependents keep full
+priority, so the critical path of a parallel build gets the CPU first when more
+`lean` threads are runnable than there are CPUs.
+-/
+
+/-- The nice increments of modules, by name (`setModuleNices`). -/
+private builtin_initialize moduleNicesRef : IO.Ref (Std.HashMap Lean.Name Nat) ← IO.mkRef {}
+
+/-- Records the nice increments of a library's modules. -/
+public def setModuleNices (nices : Array (Lean.Name × Nat)) : BaseIO Unit :=
+  moduleNicesRef.modify fun m => nices.foldl (init := m) fun m (n, v) => m.insert n v
+
+/-- The nice increment of a module's compile (0 if unknown). -/
+public def moduleNice (mod : Lean.Name) : BaseIO Nat :=
+  return (← moduleNicesRef.get).getD mod 0
+
 /--
 Compile with `blake-zygote`: `args` as for `lean`, with `LEAN_PATH` set to `leanPath`.
 Returns `none` if the zygote failed (Lake then runs `lean` itself).
 -/
 private def runLeanZygote
-  (zygote : FilePath) (args : Array String) (leanPath : String)
+  (zygote : FilePath) (args : Array String) (leanPath : String) (nice : Nat := 0)
 : IO (Option IO.Process.Output) := do
   let z ← getZygote zygote
   let id ← z.nextId.modifyGet fun n => (n, n + 1)
@@ -150,7 +169,7 @@ private def runLeanZygote
   let (_, outFile) ← IO.FS.createTempFile
   let (_, errFile) ← IO.FS.createTempFile
   try
-    let fields := #[toString id, outFile.toString, errFile.toString, leanPath, "lean"] ++ args
+    let fields := #[toString id, outFile.toString, errFile.toString, leanPath, toString nice, "lean"] ++ args
     let request := fields.foldl (init := s!"{fields.size}\x00") (· ++ · ++ "\x00")
     z.writeLock.lock
     try
@@ -202,7 +221,8 @@ private builtin_initialize headerSavesRef : IO.Ref (Array (Task (Except IO.Error
 private def runLeanQuiet (lean : FilePath) (args : Array String) (leanPath : SearchPath) : IO UInt32 := do
   if let some zygote ← zygoteFor? lean then
     if let some sysroot := lean.parent >>= (·.parent) then
-      if let some out ← runLeanZygote zygote args (leanPath ++ [sysroot / "lib" / "lean"]).toString then
+      -- Background work: the lowest priority used for compiles (`critical-nice`).
+      if let some out ← runLeanZygote zygote args (leanPath ++ [sysroot / "lib" / "lean"]).toString 10 then
         return out.exitCode
   let out ← IO.Process.output {cmd := lean.toString, args, env := #[("LEAN_PATH", leanPath.toString)]}
   return out.exitCode
@@ -262,6 +282,7 @@ public def compileLeanModule
   (leanir : FilePath := "leanir")
   (incrLoad? : Option FilePath := none)
   (headerSave? : Option HeaderSave := none)
+  (nice : Nat := 0)
 : LogIO Unit := do
   let mut args := leanArgs.push leanFile.toString
   if let some oleanFile := arts.olean? then
@@ -299,7 +320,7 @@ public def compileLeanModule
         -- The zygote's built-in search path is relative to its own location, so the
         -- toolchain's library directory (which `lean` would add last) is added here.
         let zygoteLeanPath := (leanPath ++ [sysroot / "lib" / "lean"]).toString
-        if let .ok (some out) ← (runLeanZygote zygote args zygoteLeanPath).toBaseIO then
+        if let .ok (some out) ← (runLeanZygote zygote args zygoteLeanPath nice).toBaseIO then
           return out
         return ← rawProc spawnArgs (quiet := true)
     rawProc spawnArgs

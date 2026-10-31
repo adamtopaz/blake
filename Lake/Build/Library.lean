@@ -27,8 +27,38 @@ namespace Lake
 
 private structure ModuleCollection where
   mods : Array Module := #[]
+  /-- Blake (`critical-nice`): the local imports of each module of `mods`. -/
+  imports : Array (Array Module) := #[]
   modSet : ModuleSet := ∅
   hasErrors : Bool := false
+
+/--
+Blake (2026-10-31, `critical-nice`): the nice increment of each module's compile.
+A module's slack is how much shorter the longest chain of the library's imports
+through it is than the library's longest chain (its critical path): modules on a
+critical path keep nice 0, and the others get 2 per module of slack, up to 19. `mods`
+lists every module after its imports, as `recCollectLocalModules` collects them.
+-/
+private def moduleNices (mods : Array Module) (imports : Array (Array Module)) :
+    Array (Lean.Name × Nat) := Id.run do
+  let index : Std.HashMap Lean.Name Nat :=
+    mods.foldl (init := {}) fun m mod => m.insert mod.name m.size
+  let localImports (i : Nat) : Array Nat :=
+    (imports[i]?.getD #[]).filterMap (index[·.name]?)
+  -- `depth`: the longest chain of imports below a module; `height`: above it.
+  let mut depth := Array.replicate mods.size 0
+  for i in [0:mods.size] do
+    for j in localImports i do
+      depth := depth.set! i (max depth[i]! (depth[j]! + 1))
+  let mut height := Array.replicate mods.size 0
+  for i' in [0:mods.size] do
+    let i := mods.size - 1 - i'
+    for j in localImports i do
+      height := height.set! j (max height[j]! (height[i]! + 1))
+  let longest := (Array.range mods.size).foldl (init := 0) fun m i => max m (depth[i]! + height[i]!)
+  if longest == 0 then
+    return #[]
+  return mods.mapIdx fun i mod => (mod.name, min 19 (2 * (longest - (depth[i]! + height[i]!))))
 
 /--
 Collect the local modules of a library.
@@ -52,6 +82,7 @@ partial def LeanLib.recCollectLocalModules
     -- This is not considered a fatal error because we want the modules
     -- built to provide better error categorization in the monitor.
     logError s!"{self.name}: some modules have bad imports or could not be read"
+  setModuleNices (moduleNices col.mods col.imports) -- Blake (`critical-nice`)
   return Job.pure col.mods
 where
   go root col (viaImport : Bool) := do
@@ -62,14 +93,15 @@ where
       -- stay in the collection so their build jobs report those failures.
       let some imps ← (← root.imports.fetch).waitUnlessCanceled?
         | let col' := {col with hasErrors := true}
-          return if viaImport then col' else {col' with mods := col'.mods.push root}
+          return if viaImport then col' else
+            {col' with mods := col'.mods.push root, imports := col'.imports.push #[]}
       for mod in imps do
         if mod.lib.name = self.name && !col.modSet.contains mod then
           discard <| mod.imports.fetch
       for mod in imps do
         if mod.lib.name = self.name then
           col ← go mod col (viaImport := true)
-      col := {col with mods := col.mods.push root}
+      col := {col with mods := col.mods.push root, imports := col.imports.push imps}
     return col
 
 /-- The `LibraryFacetConfig` for the builtin `modulesFacet`. -/

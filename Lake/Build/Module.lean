@@ -1070,8 +1070,9 @@ def Module.buildLean
   let (incrLoad?, headerSave?, recordSnapshot) ←
     mod.headerSnapshot presetup setup args leanPath lean
   mod.clearOutputArtifacts
+  -- Modified for Blake (2026-10-31): the module's priority (see `setModuleNices`).
   compileLeanModule presetup.srcFile relSrcFile setup mod.setupFile arts args
-    leanPath lean (← getLeanir) incrLoad? headerSave?
+    leanPath lean (← getLeanir) incrLoad? headerSave? (nice := ← moduleNice mod.name)
   recordSnapshot
   mod.clearOutputHashes
   mod.computeArtifacts setup.isModule
