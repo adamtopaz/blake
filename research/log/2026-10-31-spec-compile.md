@@ -3,7 +3,7 @@
 - **Date:** 2026-10-31
 - **Author:** Claude (Opus 5.5) with Adam Topaz, machine `2e698309` (i9-14900K, 16 of 32 CPUs, 32 GB cap)
 - **Outcome:** failure (no effect on `leaf`, which it targets; the harness's `success` comes from `noop` noise, see below)
-- **Branch / PR:** research/spec-compile-log (code: research/spec-compile-wip, https://github.com/adamtopaz/blake/tree/research/spec-compile-wip) — PR TBD
+- **Branch / PR:** research/spec-compile-log (code: research/spec-compile-wip, https://github.com/adamtopaz/blake/tree/research/spec-compile-wip) — https://github.com/adamtopaz/blake/pull/20
 - **Result files:** research/results/20261031T225057Z-2e698309-5d37e98.json
 
 ## Hypothesis
