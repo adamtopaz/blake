@@ -87,6 +87,16 @@ def LeanLib.recBuildLean
   discard <| (IO.asTask (prio := .dedicated) do
     if (← mods.anyM fun mod => sourceNewerThanTrace mod) then
       prestartZygote lean : BaseIO _)
+  -- PROTOTYPE: fetch the modules' jobs from several jobs in parallel first.
+  let k := 8
+  let chunks : Array (Array Module) := (Array.range k).map fun c =>
+    (mods.mapIdx fun i m => (i, m)).filterMap fun (i, m) => if i % k == c then some m else none
+  let chunkJobs ← chunks.mapM fun chunk => Job.async (do
+    for mod in chunk do
+      discard <| mod.leanArts.fetch
+    return ())
+  for j in chunkJobs do
+    discard <| j.await
   mods.foldlM (init := Job.nil) fun job mod => do
     return job.mix <| ← mod.leanArts.fetch
 where
