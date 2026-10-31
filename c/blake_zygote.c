@@ -10,13 +10,18 @@ executable runs. The child therefore writes the same artifacts as `lean`, withou
 paying for `exec`, dynamic linking, and Lean's initialization on every module.
 
 Protocol (binary, on stdin): a request is a decimal field count followed by that many
-fields, each terminated by a NUL byte: the stdout file, the stderr file, the value of
-`LEAN_PATH`, and then `argv` (starting with `argv[0]`). A count of 0, or end of input,
-ends the server. The reply (on stdout) is the child's exit code as a decimal line
-(128 + the signal number if it was killed by a signal).
+fields, each terminated by a NUL byte: a request id, the stdout file, the stderr file,
+the value of `LEAN_PATH`, and then `argv` (starting with `argv[0]`). Requests may be
+sent while earlier ones are still running; each runs in its own child at once. When a
+child exits, the server writes `<id> <exit code>` as a line on stdout (128 + the signal
+number if it was killed by a signal). A count of 0, or end of input, makes the server
+wait for its running children and exit.
 */
 #include <lean/lean.h>
+#include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
+#include <signal.h>
 #include <getopt.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -90,54 +95,138 @@ static int child_main(int argc, char ** argv) {
   return a.rc;
 }
 
-/* Reads one NUL-terminated field from stdin into a malloc'd buffer; NULL at end of input. */
-static char * read_field(void) {
-  size_t cap = 256, n = 0; char * buf = malloc(cap);
-  for (;;) {
-    int ch = getchar();
-    if (ch == EOF) { free(buf); return NULL; }
-    if (n + 1 >= cap) { cap *= 2; buf = realloc(buf, cap); }
-    buf[n++] = (char)ch;
-    if (ch == 0) return buf;
+static int sig_pipe[2] = {-1, -1};
+
+static void on_sigchld(int sig) {
+  (void)sig;
+  int saved = errno;
+  char c = 0;
+  if (write(sig_pipe[1], &c, 1) < 0) {}
+  errno = saved;
+}
+
+/* Running children: pid and request id. */
+static pid_t * child_pids; static char ** child_ids; static size_t n_children, cap_children;
+
+static void spawn(char ** fields, int count) {
+  fflush(NULL);
+  pid_t pid = fork();
+  if (pid == 0) {
+    signal(SIGCHLD, SIG_DFL);
+    close(sig_pipe[0]); close(sig_pipe[1]);
+    int devnull = open("/dev/null", O_RDONLY);
+    int out = open(fields[1], O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    int err = open(fields[2], O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (devnull < 0 || out < 0 || err < 0) _exit(127);
+    dup2(devnull, 0); dup2(out, 1); dup2(err, 2);
+    close(devnull); close(out); close(err);
+    setenv("LEAN_PATH", fields[3], 1);
+    int rc = child_main(count - 4, fields + 4);
+    fflush(NULL);
+    _exit(rc);
   }
+  if (pid < 0) {
+    printf("%s 127\n", fields[0]);
+    fflush(stdout);
+    return;
+  }
+  if (n_children == cap_children) {
+    cap_children = cap_children ? 2 * cap_children : 32;
+    child_pids = realloc(child_pids, cap_children * sizeof(pid_t));
+    child_ids = realloc(child_ids, cap_children * sizeof(char *));
+  }
+  child_pids[n_children] = pid;
+  child_ids[n_children] = strdup(fields[0]);
+  n_children++;
+}
+
+static void reap(int block) {
+  for (;;) {
+    int st;
+    pid_t pid = waitpid(-1, &st, block ? 0 : WNOHANG);
+    if (pid <= 0) {
+      if (pid < 0 && errno == EINTR) continue;
+      return;
+    }
+    int code = WIFEXITED(st) ? WEXITSTATUS(st) : (WIFSIGNALED(st) ? 128 + WTERMSIG(st) : 127);
+    for (size_t i = 0; i < n_children; i++) {
+      if (child_pids[i] == pid) {
+        printf("%s %d\n", child_ids[i], code);
+        fflush(stdout);
+        free(child_ids[i]);
+        child_pids[i] = child_pids[n_children - 1];
+        child_ids[i] = child_ids[n_children - 1];
+        n_children--;
+        break;
+      }
+    }
+    if (block && n_children == 0) return;
+  }
+}
+
+/* Input buffer of requests not yet parsed. */
+static char * in_buf; static size_t in_len, in_cap;
+
+/*
+Parses one complete request at the start of `in_buf`. Returns the number of bytes it
+used (0 if the request is incomplete), and its fields (`*count` is 0 for a stop request).
+*/
+static size_t parse_request(char *** fields_out, int * count) {
+  char * end = memchr(in_buf, 0, in_len);
+  if (!end) return 0;
+  int n = atoi(in_buf);
+  size_t pos = (size_t)(end - in_buf) + 1;
+  if (n <= 0) { *count = 0; return pos; }
+  char ** fields = calloc((size_t)n + 1, sizeof(char *));
+  for (int i = 0; i < n; i++) {
+    char * e = memchr(in_buf + pos, 0, in_len - pos);
+    if (!e) { free(fields); return 0; }
+    fields[i] = in_buf + pos;
+    pos = (size_t)(e - in_buf) + 1;
+  }
+  for (int i = 0; i < n; i++) fields[i] = strdup(fields[i]);
+  *fields_out = fields; *count = n;
+  return pos;
 }
 
 int main(void) {
   lean_initialize();
   lean_set_panic_messages(true);
-  for (;;) {
-    char * count_s = read_field();
-    if (!count_s) return 0;
-    int count = atoi(count_s); free(count_s);
-    if (count < 4) return 0;
-    char ** fields = calloc((size_t)count + 1, sizeof(char *));
-    for (int i = 0; i < count; i++) {
-      fields[i] = read_field();
-      if (!fields[i]) return 0;
+  if (pipe(sig_pipe) < 0) return 1;
+  fcntl(sig_pipe[0], F_SETFL, O_NONBLOCK); fcntl(sig_pipe[1], F_SETFL, O_NONBLOCK);
+  fcntl(sig_pipe[0], F_SETFD, FD_CLOEXEC); fcntl(sig_pipe[1], F_SETFD, FD_CLOEXEC);
+  struct sigaction sa;
+  memset(&sa, 0, sizeof sa);
+  sa.sa_handler = on_sigchld;
+  sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
+  sigaction(SIGCHLD, &sa, NULL);
+  int accepting = 1;
+  while (accepting) {
+    struct pollfd fds[2] = {{0, POLLIN, 0}, {sig_pipe[0], POLLIN, 0}};
+    if (poll(fds, 2, -1) < 0) { if (errno == EINTR) continue; break; }
+    if (fds[1].revents) {
+      char drain[64];
+      while (read(sig_pipe[0], drain, sizeof drain) > 0) {}
+      reap(0);
     }
-    fflush(NULL);
-    pid_t pid = fork();
-    if (pid == 0) {
-      int devnull = open("/dev/null", O_RDONLY);
-      int out = open(fields[0], O_WRONLY | O_CREAT | O_TRUNC, 0644);
-      int err = open(fields[1], O_WRONLY | O_CREAT | O_TRUNC, 0644);
-      if (devnull < 0 || out < 0 || err < 0) _exit(127);
-      dup2(devnull, 0); dup2(out, 1); dup2(err, 2);
-      close(devnull); close(out); close(err);
-      setenv("LEAN_PATH", fields[2], 1);
-      int rc = child_main(count - 3, fields + 3);
-      fflush(NULL);
-      _exit(rc);
+    if (fds[0].revents) {
+      if (in_len + 65536 > in_cap) { in_cap = in_len + 65536 * 2; in_buf = realloc(in_buf, in_cap); }
+      ssize_t n = read(0, in_buf + in_len, in_cap - in_len);
+      if (n <= 0) { if (n < 0 && errno == EINTR) continue; break; }
+      in_len += (size_t)n;
+      for (;;) {
+        char ** fields; int count;
+        size_t used = parse_request(&fields, &count);
+        if (used == 0) break;
+        memmove(in_buf, in_buf + used, in_len - used);
+        in_len -= used;
+        if (count == 0) { accepting = 0; break; }
+        if (count >= 5) spawn(fields, count);
+        for (int i = 0; i < count; i++) free(fields[i]);
+        free(fields);
+      }
     }
-    int code = 127;
-    if (pid > 0) {
-      int st;
-      while (waitpid(pid, &st, 0) < 0) {}
-      code = WIFEXITED(st) ? WEXITSTATUS(st) : (WIFSIGNALED(st) ? 128 + WTERMSIG(st) : 127);
-    }
-    for (int i = 0; i < count; i++) free(fields[i]);
-    free(fields);
-    printf("%d\n", code);
-    fflush(stdout);
   }
+  if (n_children > 0) reap(1);
+  return 0;
 }
