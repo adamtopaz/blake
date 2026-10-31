@@ -3,7 +3,7 @@
 - **Date:** 2026-10-31
 - **Author:** Claude (Opus 5.5) with Adam Topaz, machine `2e698309` (i9-14900K, 16 of 32 CPUs, 32 GB cap)
 - **Outcome:** failure (no effect on the scenarios it targets; the harness's `success` comes from a `noop` result this change cannot cause, see below)
-- **Branch / PR:** research/critical-nice-log (code: research/critical-nice-wip, https://github.com/adamtopaz/blake/tree/research/critical-nice-wip) — PR TBD
+- **Branch / PR:** research/critical-nice-log (code: research/critical-nice-wip, https://github.com/adamtopaz/blake/tree/research/critical-nice-wip) — https://github.com/adamtopaz/blake/pull/18
 - **Result files:** research/results/20261031T202904Z-2e698309-3e49371.json
 
 ## Hypothesis
