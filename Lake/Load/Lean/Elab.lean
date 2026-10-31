@@ -13,6 +13,7 @@ import Lake.DSL.Extensions
 import Lake.Util.JsonObject
 import Init.System.Platform
 import Lake.DSL.AttributesCore
+import Lake.Util.FullInit
 
 /-! # Lean Configuration Elaborator
 
@@ -178,6 +179,7 @@ an up-to-date one exists (i.e., one with matching configuration and on the same
 toolchain). Otherwise, elaborate the configuration and save it to the `.olean`.
 -/
 public def importConfigFile (cfg : LoadConfig) : LogIO Environment := do
+  fullInitialize -- Modified for Blake (2026-10-31): see `fullInitialize`.
   let some configName := FilePath.mk <$> cfg.configFile.fileName
     | error "invalid configuration file name"
   let configDir := cfg.configDir

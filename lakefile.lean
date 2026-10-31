@@ -84,8 +84,20 @@ target blakeZygote pkg : FilePath := do
         IO.FS.writeFile exe "" -- placeholder; `zygoteFor?` ignores a non-executable zygote
     return exe
 
+/-- Blake (2026-10-31, `lazy-init`): deferred initialization of Lean (`c/blake_init.c`). -/
+target blakeInit pkg : FilePath := do
+  let srcJob ← inputTextFile <| pkg.dir / "c" / "blake_init.c"
+  let oFile := pkg.buildDir / "c" / "blake_init.o"
+  buildO oFile srcJob #["-I", (← getLeanIncludeDir).toString] #["-O2", "-fPIC"] (← getLeanCc)
+
 @[default_target]
 lean_exe lake where
   root := `LakeMain
   needs := #[Lake, blakeZygote]
   supportInterpreter := true
+  moreLinkObjs := #[blakeInit]
+  -- See `c/blake_init.c`; `--wrap` is a GNU linker option, used on Linux only.
+  moreLinkArgs :=
+    if System.Platform.isWindows || System.Platform.isOSX then #[] else
+      #["lean_initialize", "lean_io_initializing", "runtime_initialize_LeanExport_Basic",
+        "runtime_initialize_Lake_CLI_Check"].map (s!"-Wl,--wrap={·}")
