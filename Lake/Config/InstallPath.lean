@@ -257,7 +257,7 @@ Whether the `Init.olean` of the Lean installation at `sysroot` records this
 Lake's own `Lean.githash` (whose header layout is known), i.e., whether that
 installation's `lean --githash` would print `Lean.githash`.
 -/
-def initOleanHasLeanGithash (sysroot : FilePath) : BaseIO Bool := do
+public def initOleanHasLeanGithash (sysroot : FilePath) : BaseIO Bool := do
   let githash := Lean.githash.toUTF8.data
   if githash.size != 40 then
     return false

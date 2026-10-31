@@ -10,6 +10,7 @@ public import Lake.Config.Workspace
 import Lake.Config.Monad
 import Lake.Build.Job.Monad
 import Lake.Build.Index
+import Lake.Build.Actions
 import Init.Omega
 
 /-! # Build Runner
@@ -439,6 +440,7 @@ public def Workspace.runFetchM
   let bctx ← mkBuildContext ws cfg jobs cancelTk?
   let job ← startBuild bctx build caption
   let result ← monitorJob mctx job
+  stopZygotes -- Modified for Blake (2026-10-30): see `Lake.stopZygotes`.
   finalizeBuild cfg bctx mctx result
 
 def monitorBuild (mctx : MonitorContext) (job : Job (Job α)) : BaseIO (BuildResult α) := do
@@ -480,6 +482,7 @@ public def Workspace.runBuild
   let bctx ← mkBuildContext ws cfg jobs cancelTk?
   let job ← startBuild bctx build
   let result ← monitorBuild mctx job
+  stopZygotes -- Modified for Blake (2026-10-30): see `Lake.stopZygotes`.
   finalizeBuild cfg bctx mctx result
 
 /-- Produce a build job in the Lake monad's workspace and await the result. -/

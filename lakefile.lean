@@ -53,8 +53,39 @@ lean_lib Lake where
   -- `Lake.Check` links the export parser, which is vendored in-tree as `LeanExport`
   needs := #[LeanExport]
 
+/-
+Blake (2026-10-30): `blake-zygote`, a fork server that runs `lean`'s own driver
+(`lean_shell_main`) in pre-initialized children (see `c/blake_zygote.c` and
+`Lake/Build/Zygote.lean`). It links the toolchain's `libleanshared` so that it is
+initialized exactly like `lean`.
+-/
+target blakeZygote pkg : FilePath := do
+  let srcJob ← inputTextFile <| pkg.dir / "c" / "blake_zygote.c"
+  -- The toolchain's bundled clang has only the headers that Lean's generated C needs
+  -- (`-nostdinc`); the zygote needs POSIX headers, so it is built with `LEAN_CC` if
+  -- set, else the system `cc`. If that fails, Blake still builds and runs `lean`.
+  let lean ← getLeanInstall
+  let cc : FilePath := if lean.customCc then lean.cc else "cc"
+  let inc ← getLeanIncludeDir
+  let libDir ← getLeanLibDir
+  srcJob.mapM fun src => do
+    let exe := pkg.binDir / "blake-zygote"
+    addPlatformTrace
+    addLeanTrace
+    addPureTrace cc.toString "cc"
+    let args := #["-o", exe.toString, src.toString, "-O2", "-I", inc.toString,
+      "-L", libDir.toString, "-lleanshared", s!"-Wl,-rpath,{libDir}",
+      s!"-Wl,-rpath-link,{libDir}", "-lpthread"]
+    buildFileUnlessUpToDate' exe do
+      createParentDirs exe
+      let out ← rawProc {cmd := cc.toString, args}
+      unless out.exitCode == 0 do
+        logWarning s!"blake-zygote could not be built (Blake will run `lean` directly):\n{out.stderr}"
+        IO.FS.writeFile exe "" -- placeholder; `zygoteFor?` ignores a non-executable zygote
+    return exe
+
 @[default_target]
 lean_exe lake where
   root := `LakeMain
-  needs := #[Lake]
+  needs := #[Lake, blakeZygote]
   supportInterpreter := true

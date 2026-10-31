@@ -11,6 +11,7 @@ import Lake.Util.Proc
 import Lake.Util.FilePath
 import Lake.Util.IO
 import Lake.Util.Url
+import Lake.Config.InstallPath
 import Init.Data.String.Search
 import Init.Data.String.TakeDrop
 import Init.System.Platform
@@ -25,6 +26,90 @@ open System
 open Lean hiding SearchPath
 
 namespace Lake
+
+/-
+Modified for Blake (2026-10-30): `lean` runs through `blake-zygote` when possible.
+`blake-zygote` (`c/blake_zygote.c`, built next to Blake's binary) initializes Lean once
+and compiles each module in a forked child that runs `lean`'s own driver
+(`lean_shell_main`), so a module no longer pays for `exec`, dynamic linking, and
+Lean's initialization (~25-30 ms). It is used only when the toolchain is the very
+Lean that Blake was built with (its `Init.olean` records Blake's `Lean.githash`);
+otherwise, or if anything goes wrong, Lake runs `lean` as before.
+-/
+
+private abbrev ZygoteChild :=
+  IO.Process.Child {stdin := .piped, stdout := .piped, stderr := .inherit}
+
+/-- Idle `blake-zygote` processes. -/
+private builtin_initialize zygoteIdle : IO.Ref (List ZygoteChild) ← IO.mkRef []
+
+/-- Every `blake-zygote` process started, so they can be stopped (see `stopZygotes`). -/
+private builtin_initialize zygoteAll : IO.Ref (Array ZygoteChild) ← IO.mkRef #[]
+
+/-- The `blake-zygote` to use for the `lean` at `lean`, if any. -/
+private def zygoteFor? (lean : FilePath) : BaseIO (Option FilePath) := do
+  let .ok appPath ← IO.appPath.toBaseIO | return none
+  let some appDir := appPath.parent | return none
+  let zygote := appDir / "blake-zygote"
+  -- An empty file is the build's placeholder for a zygote that could not be built.
+  let .ok md ← zygote.metadata.toBaseIO | return none
+  unless md.byteSize > 0 do return none
+  let some sysroot := lean.parent >>= (·.parent) | return none
+  unless (← initOleanHasLeanGithash sysroot) do return none
+  return some zygote
+
+/--
+Compile with `blake-zygote`: `args` as for `lean`, with `LEAN_PATH` set to `leanPath`.
+Returns `none` if the zygote failed (Lake then runs `lean` itself).
+-/
+private def runLeanZygote
+  (zygote : FilePath) (args : Array String) (leanPath : String)
+: IO (Option IO.Process.Output) := do
+  let child ← match ← zygoteIdle.modifyGet fun | z :: zs => (some z, zs) | [] => (none, []) with
+    | some z => pure z
+    | none =>
+      let z ← IO.Process.spawn {cmd := zygote.toString, stdin := .piped, stdout := .piped, stderr := .inherit}
+      zygoteAll.modify (·.push z)
+      pure z
+  let (_, outFile) ← IO.FS.createTempFile
+  let (_, errFile) ← IO.FS.createTempFile
+  try
+    let fields := #[outFile.toString, errFile.toString, leanPath, "lean"] ++ args
+    child.stdin.putStr <| fields.foldl (init := s!"{fields.size}\x00") (· ++ · ++ "\x00")
+    child.stdin.flush
+    let some code := (← child.stdout.getLine).trimAscii.copy.toNat?
+      | return none -- the zygote died; it is not returned to the pool
+    zygoteIdle.modify (child :: ·)
+    return some {exitCode := code.toUInt32, stdout := ← IO.FS.readFile outFile, stderr := ← IO.FS.readFile errFile}
+  finally
+    try IO.FS.removeFile outFile catch _ => pure ()
+    try IO.FS.removeFile errFile catch _ => pure ()
+
+/--
+Start one `blake-zygote` for the `lean` at `lean` ahead of time, if none is running yet,
+so that its initialization overlaps with whatever the build does before its first compile.
+-/
+public def prestartZygote (lean : FilePath) : BaseIO Unit := do
+  let some zygote ← zygoteFor? lean | return
+  unless (← zygoteAll.get).isEmpty do return
+  let spawn : IO ZygoteChild :=
+    IO.Process.spawn {cmd := zygote.toString, stdin := .piped, stdout := .piped, stderr := .inherit}
+  if let .ok z ← spawn.toBaseIO then
+    zygoteAll.modify (·.push z)
+    zygoteIdle.modify (z :: ·)
+
+/-- Stop all `blake-zygote` processes (at the end of a build; none may outlive Lake). -/
+public def stopZygotes : BaseIO Unit := do
+  let zs ← zygoteAll.modifyGet (·, #[])
+  zygoteIdle.set []
+  -- Ask every zygote to stop before reaping any, so that their exits overlap.
+  for z in zs do
+    let ask : IO Unit := do
+      z.stdin.putStr "0\x00"
+      z.stdin.flush
+    ask.catchExceptions fun _ => z.kill.catchExceptions fun _ => pure ()
+  for z in zs do
+    (discard z.wait : IO Unit).catchExceptions fun _ => pure ()
 
 public def compileLeanModule
   (leanFile relLeanFile : FilePath)
@@ -56,13 +141,25 @@ public def compileLeanModule
   args := args ++ #["--setup", setupFile.toString]
   args := args.push "--json"
   withLogErrorPos do
-  let out ← rawProc {
+  let spawnArgs : IO.Process.SpawnArgs := {
     args
     cmd := lean.toString
     env := #[
       ("LEAN_PATH", leanPath.toString)
     ]
   }
+  -- Blake: through `blake-zygote` when possible (see `zygoteFor?`).
+  let out ← id do
+    if let some zygote ← zygoteFor? lean then
+      if let some sysroot := lean.parent >>= (·.parent) then
+        logVerbose (mkCmdLog spawnArgs)
+        -- The zygote's built-in search path is relative to its own location, so the
+        -- toolchain's library directory (which `lean` would add last) is added here.
+        let zygoteLeanPath := (leanPath ++ [sysroot / "lib" / "lean"]).toString
+        if let .ok (some out) ← (runLeanZygote zygote args zygoteLeanPath).toBaseIO then
+          return out
+        return ← rawProc spawnArgs (quiet := true)
+    rawProc spawnArgs
   let outLogPos ← getLogPos
   unless out.stdout.isEmpty do
     let txt ← out.stdout.split '\n' |>.foldM (init := "") fun (txt : String) ln => do
