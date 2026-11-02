@@ -51,6 +51,12 @@ Added in Blake:
   of its own installation. The `leanInclude` target copies Lean's C headers into
   the bootstrap include directory.
 * `lean-toolchain`, `LICENSE`, `.gitignore`, `flake.nix`/`flake.lock`.
+* The research loop: `instructions.md` and `CLAUDE.md` for coding agents, the
+  benchmark in `bench/`, the results in `research/`, and the GitHub workflows in
+  `.github/`.
+* `c/`: `blake_zygote.c`, a fork server that compiles modules for Blake without
+  starting a new `lean` process for each, and `blake_init.c`, which defers most of
+  Lean's initialization in the `lake` executable until a command needs it.
 
 Modified from upstream (each file carries a "Modified for Blake" notice):
 
